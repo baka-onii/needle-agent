@@ -119,3 +119,8 @@ def test_execute_truncates() -> None:
     reg.get("calculator").handler = lambda expression: "x" * 50
     result = execute(ToolCall(name="calculator", arguments={"expression": "1"}), reg, config)
     assert result.success and "truncated" in result.output
+
+
+@pytest.mark.parametrize("score", [float("inf"), float("nan"), -1.0, 2.0, True])
+def test_confidence_helper_rejects_nonprobabilities(score) -> None:
+    assert is_confident(score, 0.85) is False

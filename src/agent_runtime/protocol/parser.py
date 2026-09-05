@@ -1,17 +1,12 @@
-"""Action protocol parser (spec §17-20). Independent from LangGraph.
-
-Only content inside ``<tool>`` is executable intent. ``<final>`` carries the
-answer. No ``<tool>`` and no ``<final>`` → the whole response is the final
-answer (tag-less model fallback, §19).
-"""
+"""Independent, fail-closed parser for the <tool>/<final> text protocol."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
 
-_TOOL_RE = re.compile(r"<tool\s*>(.*?)</tool\s*>", re.DOTALL)
-_FINAL_RE = re.compile(r"<final\s*>(.*?)</final\s*>", re.DOTALL)
+_TAG = re.compile(r"<(/?)(tool|final)\s*>")
+_FINAL = re.compile(r"<final\s*>(.*?)</final\s*>", re.DOTALL)
 
 
 @dataclass
@@ -22,13 +17,45 @@ class ParsedResponse:
 
 
 def parse_response(text: str) -> ParsedResponse:
-    actions = [m.group(1).strip() for m in _TOOL_RE.finditer(text)]
-    actions = [a for a in actions if a]  # drop empty blocks
-    final_match = _FINAL_RE.search(text)
-    final_answer = final_match.group(1).strip() if final_match else None
-    if final_answer == "":
-        final_answer = None
-    reasoning = _TOOL_RE.sub("", _FINAL_RE.sub("", text)).strip()
-    if not actions and final_answer is None:
-        final_answer = text.strip() or None  # §19 tag-less fallback
-    return ParsedResponse(reasoning=reasoning, actions=actions, final_answer=final_answer)
+    # A complete final always wins; literal tool tags in an answer are inert data.
+    final = _FINAL.search(text)
+    if final is not None:
+        return ParsedResponse(
+            reasoning=(text[: final.start()] + text[final.end() :]).strip(),
+            final_answer=final.group(1).strip(),
+        )
+    actions: list[str] = []
+    finals: list[str] = []
+    prose: list[str] = []
+    opened: tuple[str, int] | None = None
+    cursor = 0
+    malformed = False
+    for tag in _TAG.finditer(text):
+        closing, name = tag.group(1, 2)
+        if not closing:
+            if opened is not None:
+                malformed = True
+                break
+            prose.append(text[cursor : tag.start()])
+            opened = (name, tag.end())
+        else:
+            if opened is None or opened[0] != name:
+                malformed = True
+                break
+            content = text[opened[1] : tag.start()].strip()
+            if name == "final":
+                finals.append(content)  # even an empty final forbids execution
+            elif content:
+                actions.append(content)
+            opened = None
+            cursor = tag.end()
+    if malformed or opened is not None:
+        # A nested or unclosed block never smuggles an inner action through.
+        return ParsedResponse(reasoning=text.strip(), final_answer=text.strip() or None)
+    prose.append(text[cursor:])
+    reasoning = "".join(prose).strip()
+    if finals:
+        return ParsedResponse(reasoning=reasoning, actions=actions, final_answer=finals[0])
+    if actions:
+        return ParsedResponse(reasoning=reasoning, actions=actions)
+    return ParsedResponse(reasoning=reasoning, final_answer=text.strip() or None)

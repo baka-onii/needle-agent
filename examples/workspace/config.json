@@ -1,0 +1,7 @@
+{
+  "project": "Fieldnotes",
+  "version": "0.1.0",
+  "authentication": "local",
+  "features": ["notes", "tags", "search"],
+  "timezone": "UTC"
+}

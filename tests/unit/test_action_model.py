@@ -111,6 +111,8 @@ def server_url():
     thread.start()
     yield f"http://127.0.0.1:{server.server_port}"
     server.shutdown()
+    server.server_close()
+    thread.join(timeout=2)
 
 
 def test_llama_server_generate(server_url: str) -> None:
@@ -136,3 +138,46 @@ def test_tool_schema_is_needle_compatible() -> None:
     )
     schema = tool.needle_schema()
     assert set(schema) == {"name", "description", "parameters"}
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        None,
+        [],
+        {"type": "call", "function_calls": "not a list"},
+        {"type": "call", "function_calls": [{"name": "get_time", "arguments": "garbage"}]},
+        {"type": "call", "function_calls": [{"name": "get_time", "arguments": None}]},
+        {"type": "call", "function_calls": [None]},
+        {
+            "type": "call",
+            "function_calls": [{"name": "get_time", "arguments": {}}],
+            "confidence": float("nan"),
+        },
+    ],
+)
+def test_malformed_needle_output_is_not_repaired(response) -> None:
+    from agent_runtime.models.action import ActionOutputError
+    from agent_runtime.models.needle import parse_needle_response
+
+    with pytest.raises(ActionOutputError):
+        parse_needle_response(response)
+
+
+def test_uncalibrated_needle_output_fails_closed() -> None:
+    from agent_runtime.models.needle import parse_needle_response
+
+    result = parse_needle_response(
+        {
+            "type": "call",
+            "function_calls": [{"name": "get_time", "arguments": {}}],
+            "confidence": None,
+        }
+    )
+    assert result.confidence == 0.0
+
+
+def test_v1_base_url_not_duplicated(server_url: str) -> None:
+    model = LlamaServerReasoningModel(base_url=server_url + "/v1/")
+    assert model._base == server_url + "/v1"
+    assert "hi" in model.generate([{"role": "user", "content": "hello", "kind": "request"}])

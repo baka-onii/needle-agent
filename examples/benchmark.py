@@ -1,256 +1,235 @@
-"""V0 benchmark: native LLM tool calling vs Needle-lifted calling.
+"""Compare native structured calling with reasoning → Needle on identical tools.
 
-Same model (llama-server), same 7 tools, same tasks. The only difference is
-who produces structured output: the reasoning LLM itself (native `tools`
-parameter) or Needle 2 (lifted `<tool>` NL actions).
-
-Usage (server must be up):
-    .venv\\Scripts\\python.exe examples\\benchmark.py [--tasks read,list] [--out results.jsonl]
-
-Results: one JSON record per task×path, plus a human-readable summary.
-The committed report lives in docs/benchmark-v0.md.
+Requires real models; never manufactures benchmark scores from the offline demo.
+Each run gets a fresh TemporaryDirectory. Existing workspaces are never cleaned
+or overwritten. Results are JSONL; the archived V0 report is docs/benchmark-v0.md.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import sys
+import os
+import re
+import tempfile
 import time
-import urllib.request
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from agent_runtime import Agent, AgentConfig, ToolCall, ToolError
+from agent_runtime.execution.executor import execute
+from agent_runtime.execution.validator import validate
+from agent_runtime.models.reasoning import OpenAICompatibleReasoningModel
+from agent_runtime.tools.registry import create_default_registry
 
-from agent_runtime.agent import Agent  # noqa: E402
-from agent_runtime.config import AgentConfig  # noqa: E402
-from agent_runtime.execution.executor import execute  # noqa: E402
-from agent_runtime.execution.validator import validate  # noqa: E402
-from agent_runtime.tools.base import ToolCall, ToolError, ToolResult  # noqa: E402
-from agent_runtime.tools.registry import create_default_registry  # noqa: E402
-
-BASE_URL = "http://127.0.0.1:8080"
-MAX_STEPS = 8
-
-
-def _chat(messages: list[dict], tools: list[dict] | None, max_tokens: int = 256) -> dict:
-    payload: dict = {
-        "model": "ornith",
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": 0.2,
-        "stream": False,
-    }
-    if tools is not None:
-        payload["tools"] = tools
-        payload["tool_choice"] = "auto"
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        f"{BASE_URL}/v1/chat/completions", data=data, headers={"Content-Type": "application/json"}
-    )
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        return json.load(resp)
-
-
-def _setup_task(root: Path, task_id: str) -> None:
-    if task_id in ("read", "list", "search", "multi"):
-        (root / "src").mkdir(parents=True, exist_ok=True)
-        (root / "main.py").write_text("from src.auth import authenticate_user\n")
-        (root / "config.py").write_text("AUTH_BACKEND = 'local'\n")
-        (root / "src" / "auth.py").write_text("def authenticate_user(user):\n    return True\n")
-    else:
-        root.mkdir(parents=True, exist_ok=True)
-
-
-TASKS: dict[str, dict] = {
-    "read": {
-        "prompt": "Read the file config.py and tell me the auth backend.",
-        "evidence": "local",
-    },
-    "list": {
-        "prompt": "List the top-level directory of the project.",
-        "evidence": "src",
-    },
-    "search": {
-        "prompt": "Find which file defines authenticate_user.",
-        "evidence": "auth.py",
-    },
-    "calc": {
-        "prompt": "What is 2 * (15 + 3)?",
-        "evidence": "36",
-    },
-    "time": {
-        "prompt": "What time is it in UTC right now?",
-        "evidence": ":",
-    },
-    "write": {
-        "prompt": "Write exactly 'hello benchmark' to note.txt, then read it back to me.",
-        "evidence": "hello benchmark",
-    },
+TASKS = {
+    "read": {"prompt": "Read config.py and tell me the auth backend.", "evidence": "local"},
+    "list": {"prompt": "List the top-level directory of the project.", "evidence": "src"},
+    "search": {"prompt": "Find which file defines authenticate_user.", "evidence": "auth.py"},
+    "calc": {"prompt": "What is 2 * (15 + 3)?", "evidence": "36"},
+    "time": {"prompt": "What time is it in UTC right now? Return ISO-8601 with timezone."},
+    "write": {"prompt": "Write exactly 'hello benchmark' to note.txt, then read it back to me."},
     "multi": {
         "prompt": "Find which file defines authenticate_user and show me its contents.",
         "evidence": "authenticate_user",
     },
-    "refusal": {
-        "prompt": "Write a poem about the sea.",
-        "evidence": "",
-    },
+    "refusal": {"prompt": "Write a poem about the sea."},
 }
 
 
-def _check(task_id: str, final: str, workdir: Path) -> bool:
-    final = final or ""
+def _setup_task(root: Path, task_id: str) -> None:
+    if task_id in {"read", "list", "search", "multi"}:
+        (root / "src").mkdir()
+        (root / "main.py").write_text("from src.auth import authenticate_user\n", encoding="utf-8")
+        (root / "config.py").write_text("AUTH_BACKEND = 'local'\n", encoding="utf-8")
+        (root / "src" / "auth.py").write_text(
+            "def authenticate_user(user):\n    return True\n",
+            encoding="utf-8",
+        )
+
+
+def _check(task_id: str, final: str, root: Path) -> bool:
     if task_id == "write":
-        note = workdir / "note.txt"
-        return note.exists() and note.read_text() == "hello benchmark" and "hello" in final
+        note = root / "note.txt"
+        return (
+            note.is_file()
+            and note.read_text(encoding="utf-8") == "hello benchmark"
+            and "hello" in final
+        )
     if task_id == "refusal":
-        leftovers = [p for p in workdir.iterdir()]
-        return not leftovers and len(final.strip()) > 0
+        return not any(root.iterdir()) and bool(final.strip())
+    if task_id == "time":
+        return bool(
+            re.search(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)", final)
+        )
     return TASKS[task_id]["evidence"] in final
 
 
-def run_lifted(task_id: str, workdir: Path) -> dict:
-    def no_human(question: str) -> str:
-        raise ToolError("No human available in benchmark.")
+def no_human(question: str) -> str:
+    raise ToolError(
+        "No human is available in this benchmark. Complete the task without clarification."
+    )
 
-    config = AgentConfig(workspace_root=str(workdir), max_tool_steps=MAX_STEPS)
-    agent = Agent(config=config, ask_fn=no_human)
-    started = time.time()
+
+def _record(task: str, path: str, state: dict, root: Path, started: float, **metrics) -> dict:
+    final = state.get("final_answer") or ""
+    return {
+        "task": task,
+        "path": path,
+        "success": state["status"] == "COMPLETED" and _check(task, final, root),
+        "status": state["status"],
+        "steps": state.get("step_count", 0),
+        "seconds": round(time.monotonic() - started, 3),
+        "final": final[:500],
+        **metrics,
+    }
+
+
+def run_lifted(task_id: str, config: AgentConfig) -> dict:
+    counts = {"invalid": 0, "confidence_retries": 0, "safety_blocks": 0}
+
+    def count(event):
+        if event["type"] == "rejected":
+            stage = event["stage"]
+            key = (
+                "confidence_retries"
+                if stage == "confidence"
+                else ("safety_blocks" if stage == "safety" else "invalid")
+            )
+            counts[key] += 1
+
+    started = time.monotonic()
     try:
-        state = agent.run(TASKS[task_id]["prompt"])
-        ok = _check(task_id, state["final_answer"] or "", workdir)
-        return {
-            "task": task_id,
-            "path": "lifted",
-            "success": ok,
-            "status": state["status"],
-            "steps": state["step_count"],
-            "invalid": 0,
-            "seconds": round(time.time() - started, 1),
-            "final": (state["final_answer"] or "")[:300],
-        }
+        with Agent(config, ask_fn=no_human) as agent:
+            state = agent.run(TASKS[task_id]["prompt"], on_event=count)
     except Exception as exc:
-        return {
-            "task": task_id,
-            "path": "lifted",
-            "success": False,
-            "status": f"EXCEPTION: {type(exc).__name__}: {exc}",
-            "steps": -1,
-            "invalid": 0,
-            "seconds": round(time.time() - started, 1),
-            "final": "",
-        }
+        state = {"status": "ERROR", "final_answer": str(exc), "step_count": 0}
+    return _record(task_id, "lifted", state, Path(config.workspace_root), started, **counts)
 
 
-def run_native(task_id: str, workdir: Path) -> dict:
-    config = AgentConfig(workspace_root=str(workdir))
-    registry = create_default_registry(config)
-    schemas = [{"type": "function", "function": t.needle_schema()} for t in registry.list()]
-    messages: list[dict] = [
-        {"role": "system", "content": "You are a helpful assistant with tools."},
+def run_native(task_id: str, config: AgentConfig) -> dict:
+    """Only the benchmark baseline gives JSON schemas to the reasoning model."""
+    registry = create_default_registry(config, ask_fn=no_human)
+    schemas = [{"type": "function", "function": tool.needle_schema()} for tool in registry.list()]
+    model = OpenAICompatibleReasoningModel(
+        config.llm_base_url,
+        config.llm_model,
+        timeout_s=config.llm_timeout_s,
+        max_tokens=config.llm_max_tokens,
+        api_key=config.llm_api_key,
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant with tools. Use one tool per turn.",
+        },
         {"role": "user", "content": TASKS[task_id]["prompt"]},
     ]
-    steps = 0
-    invalid = 0
-    final_text = ""
-    started = time.time()
+    started = time.monotonic()
+    steps, invalid, stalls = 0, 0, 0
+    status, final = "MAX_STEPS_REACHED", "Tool step limit reached."
     try:
-        for _ in range(MAX_STEPS):
-            body = _chat(messages, schemas)
-            msg = body["choices"][0]["message"]
-            calls = msg.get("tool_calls") or []
-            if msg.get("content"):
-                final_text = msg["content"]
+        for _ in range((config.max_tool_steps + 1) * (config.max_stalls + 1)):
+            body = model._request(
+                "/chat/completions",
+                {
+                    "model": config.llm_model,
+                    "messages": messages,
+                    "tools": schemas,
+                    "tool_choice": "auto",
+                    "temperature": config.llm_temperature,
+                    "max_tokens": config.llm_max_tokens,
+                    "stream": False,
+                },
+            )
+            message = body["choices"][0]["message"]
+            calls = message.get("tool_calls") or []
             if not calls:
+                status, final = "COMPLETED", message.get("content") or ""
                 break
-            call = calls[0]
+            if steps >= config.max_tool_steps:
+                break
+            raw = calls[0]
+            messages.append(
+                {"role": "assistant", "content": message.get("content"), "tool_calls": [raw]}
+            )
             try:
-                args = json.loads(call["function"].get("arguments") or "{}")
-                tool_call = validate(
-                    ToolCall(name=call["function"]["name"], arguments=args), registry
+                call = validate(
+                    ToolCall(
+                        name=raw["function"]["name"],
+                        arguments=json.loads(raw["function"]["arguments"]),
+                    ),
+                    registry,
                 )
-            except (ToolError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            except (ToolError, ValueError, TypeError, KeyError) as exc:
                 invalid += 1
-                messages.append({"role": "assistant", "content": None, "tool_calls": calls[:1]})
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call.get("id", "0"),
-                        "content": f"Invalid tool call: {exc}. Fix it or answer directly.",
-                    }
-                )
-                continue
-            result: ToolResult = execute(tool_call, registry, config)
-            steps += 1
-            messages.append({"role": "assistant", "content": None, "tool_calls": calls[:1]})
-            text = result.output if result.success else f"Tool error: {result.error}"
-            messages.append({"role": "tool", "tool_call_id": call.get("id", "0"), "content": text})
-        else:
-            final_text = final_text or ""
-        if not final_text:
-            body = _chat(
-                [*messages, {"role": "user", "content": "Summarize the result for the user."}],
-                None,
-                max_tokens=128,
-            )
-            final_text = body["choices"][0]["message"].get("content") or ""
-        ok = _check(task_id, final_text, workdir)
-        return {
-            "task": task_id,
-            "path": "native",
-            "success": ok,
-            "status": "COMPLETED",
-            "steps": steps,
-            "invalid": invalid,
-            "seconds": round(time.time() - started, 1),
-            "final": final_text[:300],
-        }
-    except Exception as exc:
-        return {
-            "task": task_id,
-            "path": "native",
-            "success": False,
-            "status": f"EXCEPTION: {type(exc).__name__}: {exc}",
-            "steps": steps,
-            "invalid": invalid,
-            "seconds": round(time.time() - started, 1),
-            "final": final_text[:300],
-        }
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--tasks", default=",".join(TASKS), help="comma-separated task ids")
-    parser.add_argument("--out", default="bench_results.jsonl")
-    parser.add_argument("--workroot", default=r"C:\Users\acer\AppData\Local\Temp\opencode\bench")
-    args = parser.parse_args()
-
-    task_ids = [t for t in args.tasks.split(",") if t in TASKS]
-    out_path = Path(args.out)
-    for task_id in task_ids:
-        for path in ("native", "lifted"):
-            workdir = Path(args.workroot) / f"{task_id}_{path}"
-            if workdir.exists():
-                for child in sorted(workdir.rglob("*"), reverse=True):
-                    if child.is_file() or child.is_symlink():
-                        child.unlink()
-                    elif child.is_dir():
-                        child.rmdir()
-            _setup_task(workdir, task_id)
-            print(f"[bench] {task_id}/{path} ...", flush=True)
-            if path == "native":
-                record = run_native(task_id, workdir)
+                stalls += 1
+                observation = f"Invalid tool call: {exc}. Correct it or answer directly."
             else:
-                record = run_lifted(task_id, workdir)
-            with out_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record) + "\n")
-            print(
-                f"[bench] {task_id}/{path} success={record['success']} "
-                f"steps={record['steps']} invalid={record['invalid']} "
-                f"status={record['status']} {record['seconds']}s",
-                flush=True,
+                result = execute(call, registry, config)
+                steps += 1
+                stalls = 0
+                observation = result.output if result.success else f"Tool error: {result.error}"
+            messages.append(
+                {"role": "tool", "tool_call_id": raw.get("id", "0"), "content": observation}
             )
-    print("[bench] ALL DONE", flush=True)
+            if stalls >= config.max_stalls:
+                status, final = "STALLED", "Repeated invalid native calls."
+                break
+    except Exception as exc:
+        status, final = "ERROR", str(exc)
+    state = {"status": status, "final_answer": final, "step_count": steps}
+    return _record(task_id, "native", state, Path(config.workspace_root), started, invalid=invalid)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tasks", default=",".join(TASKS), help="Comma-separated task IDs")
+    parser.add_argument("--out", default=".cache/bench_results.jsonl")
+    parser.add_argument("--workroot", default=None, help="Parent for new temporary workspaces")
+    parser.add_argument(
+        "--base-url", default=os.getenv("NEEDLE_LLM_BASE_URL", "http://127.0.0.1:8080")
+    )
+    parser.add_argument("--model", default=os.getenv("NEEDLE_LLM_MODEL", "ornith"))
+    parser.add_argument("--max-steps", type=int, default=8)
+    parser.add_argument("--repeats", type=int, default=1)
+    args = parser.parse_args(argv)
+    task_ids = [task.strip() for task in args.tasks.split(",")]
+    if not task_ids or any(task not in TASKS for task in task_ids):
+        parser.error(f"Tasks must be chosen from: {', '.join(TASKS)}")
+    if args.repeats < 1 or args.max_steps < 1:
+        parser.error("Repeats and max-steps must be positive.")
+    if args.workroot:
+        Path(args.workroot).mkdir(parents=True, exist_ok=True)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    for repeat in range(args.repeats):
+        for task_id in task_ids:
+            for path, runner in (("native", run_native), ("lifted", run_lifted)):
+                with tempfile.TemporaryDirectory(
+                    prefix=f"needle-{task_id}-{path}-", dir=args.workroot
+                ) as tmp:
+                    root = Path(tmp)
+                    _setup_task(root, task_id)
+                    config = AgentConfig(
+                        workspace_root=str(root),
+                        llm_base_url=args.base_url,
+                        llm_model=args.model,
+                        llm_api_key=os.getenv("NEEDLE_LLM_API_KEY"),
+                        max_tool_steps=args.max_steps,
+                        llm_max_tokens=512,
+                        needle_weights=os.getenv("NEEDLE_WEIGHTS"),
+                    )
+                    print(f"[bench] {task_id}/{path} (repeat {repeat + 1})", flush=True)
+                    record = runner(task_id, config)
+                record.update(repeat=repeat + 1, model=args.model)
+                with out.open("a", encoding="utf-8") as file:
+                    file.write(json.dumps(record) + "\n")
+                print(
+                    f"  {record['status']} · success={record['success']} · "
+                    f"{record['steps']} steps · {record['invalid']} invalid · {record['seconds']}s",
+                    flush=True,
+                )
+    print(f"Results saved to {out}")
 
 
 if __name__ == "__main__":

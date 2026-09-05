@@ -30,7 +30,59 @@ def test_trim_keeps_system_original_and_recent() -> None:
 
 
 def test_trim_always_keeps_most_recent() -> None:
-    manager = _manager(budget=10)
+    manager = _manager(budget=13)
     transcript = [_msg("user", "request"), _msg("user", "huge-old-message"), _msg("user", "new")]
     built = manager.build(transcript)
     assert built[-1] == {"role": "user", "content": "new"}
+
+
+def test_oversized_recent_message_is_truncated_without_mutation() -> None:
+    manager = _manager(budget=40)
+    transcript = [
+        _msg("user", "request"),
+        {"role": "user", "kind": "observation", "content": "x" * 500},
+    ]
+    built = manager.build(transcript)
+    assert total_chars(built) <= 40
+    assert built[0]["content"] == "SYS"
+    assert built[1]["content"] == "request"
+    assert "truncated" in built[-1]["content"]
+    assert len(transcript[-1]["content"]) == 500
+
+
+def test_observations_drop_before_old_reasoning() -> None:
+    manager = _manager(budget=43)
+    built = manager.build(
+        [
+            _msg("user", "request"),
+            _msg("assistant", "plan"),
+            {"role": "user", "content": "x" * 40, "kind": "observation"},
+            _msg("assistant", "latest"),
+        ]
+    )
+    assert [m["content"] for m in built] == ["SYS", "request", "plan", "latest"]
+
+
+def test_impossible_pinned_context_is_rejected() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="system prompt"):
+        ContextManager(AgentConfig(max_context_chars=2), "SYS")
+    with pytest.raises(ValueError, match="Original request"):
+        _manager(budget=10).build([_msg("user", "long user request")])
+
+
+def test_current_followup_is_preserved_alongside_original() -> None:
+    manager = _manager(budget=80)
+    built = manager.build(
+        [
+            _msg("user", "Original request"),
+            _msg("assistant", "Previous answer"),
+            _msg("user", "The current follow-up"),
+            _msg("assistant", "<tool>Read file</tool>"),
+            {"role": "user", "kind": "observation", "content": "x" * 1000},
+        ]
+    )
+    assert total_chars(built) <= 80
+    assert built[1]["content"] == "Original request"
+    assert any(m["content"] == "The current follow-up" for m in built)
