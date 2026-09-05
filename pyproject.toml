@@ -32,6 +32,10 @@ dev = [
     "pytest-asyncio>=1,<2",
     "ruff>=0.12,<1",
 ]
+browser = ["playwright>=1.50,<2"]
+
+[project.scripts]
+needle-agent = "agent_runtime.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/baka-onii/needle-agent"

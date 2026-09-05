@@ -1,27 +1,22 @@
-"""LangGraph state machine (spec §29-33).
-
-REASON → PARSE → TRANSLATE → SANITIZE → VALIDATE → CONFIDENCE → SAFETY →
-EXECUTE → OBSERVE → UPDATE_CONTEXT → REASON, with FINAL/CONFIRM/MAX_STEPS exits.
-"""
+"""The explicit LangGraph V0 loop. Runtime dependencies never enter state."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
+from pydantic import ValidationError
 
 from agent_runtime.config import AgentConfig
 from agent_runtime.context.manager import ContextManager
-from agent_runtime.execution.confidence import (
-    is_confident,
-    low_confidence_message,
-    threshold_for,
-)
-from agent_runtime.execution.executor import execute
+from agent_runtime.execution.confidence import is_confident, low_confidence_message, threshold_for
+from agent_runtime.execution.executor import check_safety, execute
 from agent_runtime.execution.sanitizer import sanitize
 from agent_runtime.execution.validator import validate
-from agent_runtime.models.action import ActionModel, NeedleResult, ToolRanking
+from agent_runtime.models.action import ActionModel, ActionOutputError, NeedleResult, ToolRanking
 from agent_runtime.models.reasoning import ReasoningModel
 from agent_runtime.protocol.parser import parse_response
 from agent_runtime.state import AgentState
@@ -36,10 +31,8 @@ class RuntimeDeps:
     registry: ToolRegistry
     contexts: ContextManager
     config: AgentConfig
-
-
-def _transcript(state: AgentState) -> list[dict[str, Any]]:
-    return state["messages"]
+    cancelled: Callable[[], bool] | None = None
+    approve: Callable[[ToolCall], bool] | None = None
 
 
 def build_workflow(deps: RuntimeDeps):
@@ -51,195 +44,237 @@ def build_workflow(deps: RuntimeDeps):
         deps.config,
     )
 
-    def reason(state: AgentState) -> dict[str, Any]:
-        try:
-            raw = reasoning.generate(contexts.build(_transcript(state)))
-        except Exception as exc:  # internal error → terminate (§34)
-            return {"status": "ERROR", "final_answer": f"Reasoning model failed: {exc}"}
-        return {"messages": [*state["messages"], {"role": "assistant", "content": raw}]}
+    def emit(event_type: str, **data: Any) -> None:
+        get_stream_writer()({"type": event_type, **data})
 
-    def parse(state: AgentState) -> dict[str, Any]:
-        if state["status"] != "RUNNING" or state["final_answer"] is not None:
-            return {}  # terminal state set upstream (e.g. reason ERROR) — keep it
-        raw = state["messages"][-1].get("content", "")
-        parsed = parse_response(raw if isinstance(raw, str) else str(raw))
+    def append(state: AgentState, content: str, kind: str) -> list[dict]:
+        return contexts.build(
+            [
+                *state["messages"],
+                {"role": "user", "content": content, "kind": kind},
+            ]
+        )[1:]
+
+    def retry(state: AgentState, message: str, stage: str) -> dict:
+        stalls = state["stall_count"] + 1
+        emit("rejected", stage=stage, message=message, stalls=stalls)
+        update = {
+            "stall_count": stalls,
+            "tool_call": None,
+            "needle_result": None,
+            "current_action": None,
+            "messages": append(state, message, "confirmation"),
+        }
+        if stalls >= config.max_stalls:
+            update.update(
+                status="STALLED",
+                final_answer=(
+                    f"Stopped after {stalls} consecutive non-executing actions. {message}"
+                ),
+            )
+        return update
+
+    def reason(state: AgentState) -> dict:
+        prompt = contexts.build(state["messages"])
+        raw = reasoning.generate(prompt)
+        if not isinstance(raw, str):
+            raise TypeError("Reasoning model must return text.")
+        return {"messages": [*prompt[1:], {"role": "assistant", "content": raw}]}
+
+    def parse(state: AgentState) -> dict:
+        parsed = parse_response(state["messages"][-1]["content"])
         if parsed.final_answer is not None:
-            return {"final_answer": parsed.final_answer, "status": "COMPLETED"}
+            return {
+                "final_answer": parsed.final_answer,
+                "status": "COMPLETED",
+                "current_action": None,
+            }
         if parsed.actions:
-            # One tool action per reasoning turn (§20, §32).
-            return {"current_action": parsed.actions[0]}
+            emit("action", action=parsed.actions[0], ignored_actions=len(parsed.actions) - 1)
+            return {"current_action": parsed.actions[0], "tool_call": None, "needle_result": None}
         return {"final_answer": parsed.reasoning or "(no response)", "status": "COMPLETED"}
 
-    def translate(state: AgentState) -> dict[str, Any]:
+    def translate(state: AgentState) -> dict:
         try:
             result = action.translate(state["current_action"] or "", registry.list())
-        except Exception as exc:  # internal error → terminate (§34)
-            return {"status": "ERROR", "final_answer": f"Action model failed: {exc}"}
+            if not isinstance(result, NeedleResult):
+                raise ActionOutputError("Action model must return a NeedleResult.")
+            # Also validate model_construct() output from custom adapters.
+            result = NeedleResult.model_validate(result.model_dump())
+        except (ActionOutputError, ValidationError) as exc:
+            return retry(
+                state, f"Invalid translator output: {exc}. Please rephrase the action.", "translate"
+            )
+        emit("translation", **result.model_dump())
         return {"needle_result": result.model_dump()}
 
-    def sanitize_node(state: AgentState) -> dict[str, Any]:
+    def sanitize_node(state: AgentState) -> dict:
         try:
-            call = sanitize(NeedleResult(**(state["needle_result"] or {})))
+            call = sanitize(NeedleResult.model_validate(state["needle_result"]))
         except (ToolError, ValueError, TypeError) as exc:
-            return _stall_or_retry(state, f"Tool error: {exc} Please try another action.")
+            return retry(state, f"Tool error: {exc} Please try another action.", "sanitize")
         return {"tool_call": call.model_dump()}
 
-    def validate_node(state: AgentState) -> dict[str, Any]:
+    def validate_node(state: AgentState) -> dict:
         try:
-            call = validate(ToolCall(**(state["tool_call"] or {})), registry)
+            call = validate(ToolCall.model_validate(state["tool_call"]), registry)
         except (ToolError, ValueError, TypeError) as exc:
-            return _stall_or_retry(state, f"Tool error: {exc} Please try another action.")
+            return retry(state, f"Tool error: {exc} Please try another action.", "validate")
+        emit("validated", tool=call.name)
         return {"tool_call": call.model_dump()}
 
-    def _stall_or_retry(state: AgentState, message: str) -> dict[str, Any]:
-        stalls = state["stall_count"] + 1
-        if stalls >= config.max_stalls:
-            return {
-                "stall_count": stalls,
-                "tool_call": None,
-                "current_action": None,
-                "status": "STALLED",
-                "final_answer": (
-                    f"Stopped after {stalls} consecutive failed actions. Last error: {message}"
-                ),
-            }
-        return {
-            "tool_call": None,
-            "current_action": None,
-            "stall_count": stalls,
-            "messages": [*_transcript(state), {"role": "user", "content": message}],
-        }
+    def confidence(state: AgentState) -> dict:
+        call = ToolCall.model_validate(state["tool_call"])
+        needle = NeedleResult.model_validate(state["needle_result"])
+        gate = threshold_for(call.name, config)
+        emit(
+            "confidence",
+            tool=call.name,
+            score=needle.confidence,
+            threshold=gate,
+            accepted=is_confident(needle.confidence, gate),
+        )
+        return {}
 
-    def confirm(state: AgentState) -> dict[str, Any]:
-        stalls = state["stall_count"] + 1
-        if stalls >= config.max_stalls:
-            return {
-                "stall_count": stalls,
-                "current_action": None,
-                "needle_result": None,
-                "status": "STALLED",
-                "final_answer": (
-                    f"Stopped after {stalls} consecutive actions the translator "
-                    "could not confidently map to a tool. Last action: "
-                    f"{state['current_action']!r}"
-                ),
-            }
-        needle = NeedleResult(**(state["needle_result"] or {}))
+    def confirm(state: AgentState) -> dict:
+        needle = NeedleResult.model_validate(state["needle_result"])
         rankings = needle.rankings or [
             ToolRanking(tool_name=needle.selected_tool or "?", confidence=needle.confidence)
         ]
-        return {
-            "current_action": None,
-            "needle_result": None,
-            "stall_count": stalls,
-            "messages": [
-                *_transcript(state),
-                {
-                    "role": "user",
-                    "content": low_confidence_message(state["current_action"] or "", rankings),
-                },
-            ],
-        }
+        return retry(
+            state, low_confidence_message(state["current_action"] or "", rankings), "confidence"
+        )
 
-    def safety(state: AgentState) -> dict[str, Any]:
+    def safety(state: AgentState) -> dict:
         if state["step_count"] >= state["max_tool_steps"]:
-            return {"status": "MAX_STEPS_REACHED"}
+            return {
+                "status": "MAX_STEPS_REACHED",
+                "final_answer": (
+                    f"Stopped at the limit of {state['max_tool_steps']} tool steps. "
+                    "No further actions were executed. You can continue with a new message."
+                ),
+            }
+        call = ToolCall.model_validate(state["tool_call"])
+        try:
+            check_safety(call, config)
+            if call.name == "write_file" and deps.approve is not None and not deps.approve(call):
+                raise ToolError("The user declined this write. Do not try the write again.")
+        except ToolError as exc:
+            return retry(state, f"Safety check blocked the action: {exc}", "safety")
+        emit("safety", tool=call.name, allowed=True)
         return {}
 
-    def execute_node(state: AgentState) -> dict[str, Any]:
-        result = execute(ToolCall(**(state["tool_call"] or {})), registry, config)
+    def execute_node(state: AgentState) -> dict:
+        # A second guard at the actual execution boundary, not only in routing.
+        if state["step_count"] >= state["max_tool_steps"]:
+            return {"status": "MAX_STEPS_REACHED", "final_answer": "Tool step limit reached."}
+        call = ToolCall.model_validate(state["tool_call"])
+        emit("tool_start", tool=call.name, arguments=call.arguments, step=state["step_count"] + 1)
+        result = execute(call, registry, config)
+        emit("tool_result", tool=call.name, step=state["step_count"] + 1, **result.model_dump())
         return {
             "last_tool_result": result.model_dump(),
             "step_count": state["step_count"] + 1,
-            "stall_count": 0,  # progress resets the stall counter
+            "stall_count": 0,
         }
 
-    def observe(state: AgentState) -> dict[str, Any]:
-        result = ToolResult(**(state["last_tool_result"] or {}))
-        call = ToolCall(**(state["tool_call"] or {}))
-        if result.success:
-            content = f"Observation from tool '{call.name}':\n{result.output}"
-        else:
-            content = (
-                f"Tool error from '{call.name}': {result.error} "
-                "You may want to try a different action."
+    def observe(state: AgentState) -> dict:
+        result = ToolResult.model_validate(state["last_tool_result"])
+        call = ToolCall.model_validate(state["tool_call"])
+        content = (
+            f"Observation from tool '{call.name}':\n{result.output}"
+            if result.success
+            else (
+                f"Tool error from '{call.name}': {result.error}\nTry a different action or explain."
             )
+        )
         return {
+            "messages": [
+                *state["messages"],
+                {
+                    "role": "user",
+                    "content": content,
+                    "kind": "observation",
+                },
+            ],
             "current_action": None,
             "tool_call": None,
             "needle_result": None,
-            "messages": [*_transcript(state), {"role": "user", "content": content}],
         }
 
-    def update_context(state: AgentState) -> dict[str, Any]:
-        trimmed = contexts.build(_transcript(state))
-        return {"messages": trimmed[1:]}  # strip the prepended system prompt
+    def update_context(state: AgentState) -> dict:
+        return {"messages": contexts.build(state["messages"])[1:]}
 
-    def route_after_parse(state: AgentState) -> str:
-        if state["final_answer"] is not None:
-            return "end"
-        if state["current_action"]:
-            return "translate"
-        return "end"
+    def guarded(name: str, handler: Callable) -> Callable:
+        def node(state: AgentState) -> dict:
+            if deps.cancelled is not None and deps.cancelled():
+                return {
+                    "status": "CANCELLED",
+                    "final_answer": "Run stopped. No further tools will run.",
+                }
+            emit("phase", node=name, step=state["step_count"])
+            try:
+                return handler(state)
+            except Exception as exc:
+                # ToolError is handled at tool boundaries. Everything else is an internal error.
+                label = {"reason": "Reasoning model", "translate": "Action model"}.get(name, name)
+                return {"status": "ERROR", "final_answer": f"{label} failed: {exc}"}
 
-    def route_after_sanitize(state: AgentState) -> str:
-        if state["tool_call"]:
-            return "validate"
-        return "end" if state["status"] == "STALLED" else "reason"
+        return node
 
-    def route_after_validate(state: AgentState) -> str:
-        if state["tool_call"]:
-            return "confidence"
-        return "end" if state["status"] == "STALLED" else "reason"
+    def route(next_node: str | Callable[[AgentState], str]) -> Callable:
+        def router(state: AgentState) -> str:
+            if state["status"] != "RUNNING":
+                return END
+            return next_node(state) if callable(next_node) else next_node
 
-    def route_after_confidence(state: AgentState) -> str:
-        needle = NeedleResult(**(state["needle_result"] or {}))
-        gate = threshold_for(needle.selected_tool or "", config)
-        return "safety" if is_confident(needle.confidence, gate) else "confirm"
+        return router
 
-    def route_after_safety(state: AgentState) -> str:
-        return "end" if state["status"] == "MAX_STEPS_REACHED" else "execute"
+    def after_confidence(state: AgentState) -> str:
+        needle = NeedleResult.model_validate(state["needle_result"])
+        call = ToolCall.model_validate(state["tool_call"])
+        return (
+            "safety"
+            if is_confident(needle.confidence, threshold_for(call.name, config))
+            else "confirm"
+        )
 
-    def route_after_translate(state: AgentState) -> str:
-        return "end" if state["status"] == "ERROR" else "sanitize"
-
-    def route_after_confirm(state: AgentState) -> str:
-        return "end" if state["status"] == "STALLED" else "reason"
-
+    handlers = {
+        "reason": reason,
+        "parse": parse,
+        "translate": translate,
+        "sanitize": sanitize_node,
+        "validate": validate_node,
+        "confidence": confidence,
+        "confirm": confirm,
+        "safety": safety,
+        "execute": execute_node,
+        "observe": observe,
+        "update_context": update_context,
+    }
+    transitions = {
+        "reason": ("parse", ["parse"]),
+        "parse": (lambda s: "translate" if s["current_action"] else END, ["translate"]),
+        "translate": (
+            lambda s: "sanitize" if s["needle_result"] is not None else "reason",
+            ["sanitize", "reason"],
+        ),
+        "sanitize": (lambda s: "validate" if s["tool_call"] else "reason", ["validate", "reason"]),
+        "validate": (
+            lambda s: "confidence" if s["tool_call"] else "reason",
+            ["confidence", "reason"],
+        ),
+        "confidence": (after_confidence, ["safety", "confirm"]),
+        "confirm": ("reason", ["reason"]),
+        "safety": (lambda s: "execute" if s["tool_call"] else "reason", ["execute", "reason"]),
+        "execute": ("observe", ["observe"]),
+        "observe": ("update_context", ["update_context"]),
+        "update_context": ("reason", ["reason"]),
+    }
     graph = StateGraph(AgentState)
-    graph.add_node("reason", reason)
-    graph.add_node("parse", parse)
-    graph.add_node("translate", translate)
-    graph.add_node("sanitize", sanitize_node)
-    graph.add_node("validate", validate_node)
-    graph.add_node("confirm", confirm)
-    graph.add_node("safety", safety)
-    graph.add_node("execute", execute_node)
-    graph.add_node("observe", observe)
-    graph.add_node("update_context", update_context)
-
+    for name, handler in handlers.items():
+        graph.add_node(name, guarded(name, handler))
     graph.add_edge(START, "reason")
-    graph.add_edge("reason", "parse")
-    graph.add_conditional_edges("parse", route_after_parse, {"translate": "translate", "end": END})
-    graph.add_conditional_edges(
-        "translate", route_after_translate, {"sanitize": "sanitize", "end": END}
-    )
-    graph.add_conditional_edges(
-        "sanitize", route_after_sanitize, {"validate": "validate", "reason": "reason", "end": END}
-    )
-    graph.add_conditional_edges(
-        "validate",
-        route_after_validate,
-        {"confidence": "confidence", "reason": "reason", "end": END},
-    )
-    # Confidence is a pure branch point: passthrough node + conditional edge.
-    graph.add_node("confidence", lambda state: {})
-    graph.add_conditional_edges(
-        "confidence", route_after_confidence, {"safety": "safety", "confirm": "confirm"}
-    )
-    graph.add_conditional_edges("safety", route_after_safety, {"execute": "execute", "end": END})
-    graph.add_conditional_edges("confirm", route_after_confirm, {"reason": "reason", "end": END})
-    graph.add_edge("execute", "observe")
-    graph.add_edge("observe", "update_context")
-    graph.add_edge("update_context", "reason")
+    for name, (destination, choices) in transitions.items():
+        graph.add_conditional_edges(name, route(destination), [*choices, END])
     return graph.compile()

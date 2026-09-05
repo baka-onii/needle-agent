@@ -46,3 +46,9 @@ def test_empty_tool_block_dropped() -> None:
 def test_whitespace_tags() -> None:
     parsed = parse_response("<tool >  spaced  </tool >")
     assert parsed.actions == ["spaced"]
+
+
+def test_tool_tags_inside_final_are_inert_answer_text() -> None:
+    parsed = parse_response("<final>Example: <tool>Read a file.</tool></final>")
+    assert parsed.final_answer == "Example: <tool>Read a file.</tool>"
+    assert parsed.actions == []

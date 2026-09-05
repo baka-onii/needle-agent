@@ -1,5 +1,11 @@
 # V0 Benchmark: Native vs Needle-Lifted Tool Calling
 
+> **Archived baseline.** These are the original V0 measurements, not a rerun of the
+> interactive runtime. The updated harness now uses isolated temporary workspaces,
+> counts lifted invalid calls from real pipeline events, and requires an ISO-8601
+> UTC result for the time task. Live model files were unavailable in the development
+> sandbox, so no new live-model scores are claimed.
+
 Date: 2026-09-05. Harness: `examples/benchmark.py`. Raw records: 16 runs
 (8 tasks × 2 paths), one shot each — treat numbers as indicative, not statistical.
 

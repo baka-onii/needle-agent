@@ -8,3 +8,11 @@ build/
 .ruff_cache/
 *.cact
 needle_tool_index/
+.cache/
+.env
+.env.*
+!.env.example
+*.gguf
+bench_results*.jsonl
+playwright-report/
+test-results/

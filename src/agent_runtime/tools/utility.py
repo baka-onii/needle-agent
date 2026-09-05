@@ -1,12 +1,20 @@
-"""Utility tools: calculator (restricted AST), get_time (stdlib datetime)."""
+"""Bounded, restricted AST arithmetic and stdlib timezone lookup."""
 
 from __future__ import annotations
 
 import ast
+import math
 import operator
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from agent_runtime.config import (
+    MAX_AST_NODES,
+    MAX_EXPONENT,
+    MAX_EXPRESSION_CHARS,
+    MAX_INTEGER_BITS,
+    AgentConfig,
+)
 from agent_runtime.tools.base import Tool, ToolError
 
 _BIN_OPS = {
@@ -17,45 +25,59 @@ _BIN_OPS = {
     ast.Pow: operator.pow,
     ast.Mod: operator.mod,
 }
-
 _UNARY_OPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 
 
-def _eval(node: ast.AST) -> int | float:
+def _bounded(value: int | float) -> int | float:
+    if type(value) is int and value.bit_length() <= MAX_INTEGER_BITS:
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    raise ToolError("Result is non-real, non-finite, or exceeds the calculator's size limit.")
+
+
+def _calculate(node: ast.AST) -> int | float:
     if isinstance(node, ast.Expression):
-        return _eval(node.body)
-    if (
-        isinstance(node, ast.Constant)
-        and isinstance(node.value, (int, float))
-        and not isinstance(node.value, bool)
-    ):
-        return node.value
-    if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
-        return _BIN_OPS[type(node.op)](_eval(node.left), _eval(node.right))
+        return _calculate(node.body)
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+        return _bounded(node.value)
     if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
-        return _UNARY_OPS[type(node.op)](_eval(node.operand))
-    raise ToolError(f"Unsupported expression: {ast.dump(node)[:80]}")
+        return _bounded(_UNARY_OPS[type(node.op)](_calculate(node.operand)))
+    if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
+        left, right = _calculate(node.left), _calculate(node.right)
+        if isinstance(node.op, ast.Pow):
+            if abs(right) > MAX_EXPONENT:
+                raise ToolError("Exponent exceeds the calculator's size limit.")
+            if type(left) is int and right > 0 and left.bit_length() * right > MAX_INTEGER_BITS:
+                raise ToolError("Power would exceed the calculator's size limit.")
+        return _bounded(_BIN_OPS[type(node.op)](left, right))
+    raise ToolError(f"Unsupported expression: {type(node).__name__}.")
 
 
 def make_calculator_tool() -> Tool:
     def calculator(expression: str) -> str:
+        if len(expression) > MAX_EXPRESSION_CHARS:
+            raise ToolError("Expression exceeds the calculator's length limit.")
         try:
-            tree = ast.parse(expression, mode="eval")
-        except SyntaxError as exc:
-            raise ToolError(f"Invalid expression: {exc}") from exc
-        try:
-            return str(_eval(tree))
+            tree = ast.parse(expression.strip(), mode="eval")
+            if sum(1 for _ in ast.walk(tree)) > MAX_AST_NODES:
+                raise ToolError("Expression is too complex.")
+            return str(_calculate(tree))
         except ZeroDivisionError as exc:
             raise ToolError("Division by zero.") from exc
+        except (SyntaxError, ValueError, OverflowError, RecursionError) as exc:
+            raise ToolError("Invalid or excessively large arithmetic expression.") from exc
 
     return Tool(
         name="calculator",
-        description="Evaluate a simple arithmetic expression with + - * / ** % and parentheses.",
+        description="Evaluate arithmetic with + - * / ** % and parentheses. No code execution.",
         parameters={
             "type": "object",
             "properties": {
                 "expression": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_EXPRESSION_CHARS,
                     "description": "Arithmetic expression, e.g. '2 * (15 + 3)'.",
                 }
             },
@@ -65,14 +87,14 @@ def make_calculator_tool() -> Tool:
     )
 
 
-def make_get_time_tool() -> Tool:
+def make_get_time_tool(default_timezone: str | None = None) -> Tool:
     def get_time(timezone: str | None = None) -> str:
+        name = timezone if timezone is not None else default_timezone
         try:
-            tz = ZoneInfo(timezone) if timezone else None
-        except ZoneInfoNotFoundError as exc:
-            raise ToolError(f"Unknown timezone: {timezone!r}") from exc
-        now = datetime.now(tz).astimezone() if tz is None else datetime.now(tz)
-        return now.isoformat()
+            tz = ZoneInfo(name) if name is not None else None
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ToolError(f"Unknown timezone: {name!r}") from exc
+        return (datetime.now(tz) if tz else datetime.now().astimezone()).isoformat()
 
     return Tool(
         name="get_time",
@@ -81,8 +103,9 @@ def make_get_time_tool() -> Tool:
             "type": "object",
             "properties": {
                 "timezone": {
-                    "type": "string",
-                    "description": "IANA timezone name, e.g. 'UTC'. Local time if omitted.",
+                    "type": ["string", "null"],
+                    "minLength": 1,
+                    "description": "IANA timezone, e.g. 'UTC'. Configured/local time if omitted.",
                 }
             },
             "required": [],
@@ -91,5 +114,5 @@ def make_get_time_tool() -> Tool:
     )
 
 
-def utility_tools() -> list[Tool]:
-    return [make_calculator_tool(), make_get_time_tool()]
+def utility_tools(config: AgentConfig | None = None) -> list[Tool]:
+    return [make_calculator_tool(), make_get_time_tool((config or AgentConfig()).default_timezone)]

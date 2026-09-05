@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from agent_runtime.config import AgentConfig
 from agent_runtime.models.action import ToolRanking
 
@@ -20,7 +22,12 @@ def threshold_for(tool_name: str, config: AgentConfig) -> float:
 
 
 def is_confident(confidence: float, threshold: float) -> bool:
-    return confidence >= threshold
+    return (
+        type(confidence) in (int, float)
+        and math.isfinite(confidence)
+        and 0 <= confidence <= 1
+        and confidence >= threshold
+    )
 
 
 def low_confidence_message(action: str, rankings: list[ToolRanking]) -> str:
