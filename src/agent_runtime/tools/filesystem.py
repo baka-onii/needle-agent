@@ -11,9 +11,7 @@ from pathlib import Path
 from agent_runtime.config import AgentConfig
 from agent_runtime.tools.base import Tool, ToolError
 
-SKIP_DIRS = frozenset(
-    {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
-)
+SKIP_DIRS = frozenset({".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"})
 
 
 def resolve_safe_path(user_path: str, workspace_root: str | None) -> Path:

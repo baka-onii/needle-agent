@@ -131,9 +131,14 @@ def run_lifted(task_id: str, workdir: Path) -> dict:
         }
     except Exception as exc:
         return {
-            "task": task_id, "path": "lifted", "success": False,
-            "status": f"EXCEPTION: {type(exc).__name__}: {exc}", "steps": -1,
-            "invalid": 0, "seconds": round(time.time() - started, 1), "final": "",
+            "task": task_id,
+            "path": "lifted",
+            "success": False,
+            "status": f"EXCEPTION: {type(exc).__name__}: {exc}",
+            "steps": -1,
+            "invalid": 0,
+            "seconds": round(time.time() - started, 1),
+            "final": "",
         }
 
 
@@ -167,10 +172,13 @@ def run_native(task_id: str, workdir: Path) -> dict:
             except (ToolError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
                 invalid += 1
                 messages.append({"role": "assistant", "content": None, "tool_calls": calls[:1]})
-                messages.append({
-                    "role": "tool", "tool_call_id": call.get("id", "0"),
-                    "content": f"Invalid tool call: {exc}. Fix it or answer directly.",
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id", "0"),
+                        "content": f"Invalid tool call: {exc}. Fix it or answer directly.",
+                    }
+                )
                 continue
             result: ToolResult = execute(tool_call, registry, config)
             steps += 1
@@ -182,28 +190,37 @@ def run_native(task_id: str, workdir: Path) -> dict:
         if not final_text:
             body = _chat(
                 [*messages, {"role": "user", "content": "Summarize the result for the user."}],
-                None, max_tokens=128,
+                None,
+                max_tokens=128,
             )
             final_text = body["choices"][0]["message"].get("content") or ""
         ok = _check(task_id, final_text, workdir)
         return {
-            "task": task_id, "path": "native", "success": ok, "status": "COMPLETED",
-            "steps": steps, "invalid": invalid,
-            "seconds": round(time.time() - started, 1), "final": final_text[:300],
+            "task": task_id,
+            "path": "native",
+            "success": ok,
+            "status": "COMPLETED",
+            "steps": steps,
+            "invalid": invalid,
+            "seconds": round(time.time() - started, 1),
+            "final": final_text[:300],
         }
     except Exception as exc:
         return {
-            "task": task_id, "path": "native", "success": False,
-            "status": f"EXCEPTION: {type(exc).__name__}: {exc}", "steps": steps,
-            "invalid": invalid, "seconds": round(time.time() - started, 1),
+            "task": task_id,
+            "path": "native",
+            "success": False,
+            "status": f"EXCEPTION: {type(exc).__name__}: {exc}",
+            "steps": steps,
+            "invalid": invalid,
+            "seconds": round(time.time() - started, 1),
             "final": final_text[:300],
         }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tasks", default=",".join(TASKS),
-                        help="comma-separated task ids")
+    parser.add_argument("--tasks", default=",".join(TASKS), help="comma-separated task ids")
     parser.add_argument("--out", default="bench_results.jsonl")
     parser.add_argument("--workroot", default=r"C:\Users\acer\AppData\Local\Temp\opencode\bench")
     args = parser.parse_args()
@@ -227,9 +244,12 @@ def main() -> None:
                 record = run_lifted(task_id, workdir)
             with out_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record) + "\n")
-            print(f"[bench] {task_id}/{path} success={record['success']} "
-                  f"steps={record['steps']} invalid={record['invalid']} "
-                  f"status={record['status']} {record['seconds']}s", flush=True)
+            print(
+                f"[bench] {task_id}/{path} success={record['success']} "
+                f"steps={record['steps']} invalid={record['invalid']} "
+                f"status={record['status']} {record['seconds']}s",
+                flush=True,
+            )
     print("[bench] ALL DONE", flush=True)
 
 

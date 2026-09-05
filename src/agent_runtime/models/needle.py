@@ -54,9 +54,7 @@ class NeedleActionModel(ActionModel):
             confidence = float(response.get("confidence") or 0.0)
         except (TypeError, ValueError):
             confidence = 0.0
-        rankings = (
-            [ToolRanking(tool_name=selected, confidence=confidence)] if selected else []
-        )
+        rankings = [ToolRanking(tool_name=selected, confidence=confidence)] if selected else []
         return NeedleResult(
             selected_tool=selected,
             arguments=arguments if isinstance(arguments, dict) else {},

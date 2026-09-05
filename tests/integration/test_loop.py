@@ -90,8 +90,11 @@ def test_read_only_tool_clears_lower_gate(workspace: Path) -> None:
         ]
     )
     action = StubAction(
-        {"Add": NeedleResult(selected_tool="calculator", arguments={"expression": "1+1"},
-                              confidence=0.55)}
+        {
+            "Add": NeedleResult(
+                selected_tool="calculator", arguments={"expression": "1+1"}, confidence=0.55
+            )
+        }
     )
     state = _agent(workspace, reasoning, action).run("add")
     assert state["status"] == "COMPLETED"
@@ -106,9 +109,13 @@ def test_mutating_tool_held_to_strict_gate(workspace: Path) -> None:
         ]
     )
     action = StubAction(
-        {"Write": NeedleResult(selected_tool="write_file",
-                               arguments={"path": "h.txt", "content": "hi"},
-                               confidence=0.60)}
+        {
+            "Write": NeedleResult(
+                selected_tool="write_file",
+                arguments={"path": "h.txt", "content": "hi"},
+                confidence=0.60,
+            )
+        }
     )
     state = _agent(workspace, reasoning, action).run("write")
     assert state["status"] == "COMPLETED"

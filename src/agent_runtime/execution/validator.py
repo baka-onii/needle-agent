@@ -24,11 +24,7 @@ def _check_type(value: Any, expected: str, arg: str) -> None:
         return
     if expected == "integer" and isinstance(value, int) and not isinstance(value, bool):
         return
-    if (
-        expected == "number"
-        and isinstance(value, (int, float))
-        and not isinstance(value, bool)
-    ):
+    if expected == "number" and isinstance(value, (int, float)) and not isinstance(value, bool):
         return
     if expected == "array" and isinstance(value, list):
         return

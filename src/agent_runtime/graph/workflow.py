@@ -237,12 +237,8 @@ def build_workflow(deps: RuntimeDeps):
     graph.add_conditional_edges(
         "confidence", route_after_confidence, {"safety": "safety", "confirm": "confirm"}
     )
-    graph.add_conditional_edges(
-        "safety", route_after_safety, {"execute": "execute", "end": END}
-    )
-    graph.add_conditional_edges(
-        "confirm", route_after_confirm, {"reason": "reason", "end": END}
-    )
+    graph.add_conditional_edges("safety", route_after_safety, {"execute": "execute", "end": END})
+    graph.add_conditional_edges("confirm", route_after_confirm, {"reason": "reason", "end": END})
     graph.add_edge("execute", "observe")
     graph.add_edge("observe", "update_context")
     graph.add_edge("update_context", "reason")

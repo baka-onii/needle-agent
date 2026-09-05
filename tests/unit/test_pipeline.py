@@ -99,11 +99,13 @@ def test_confidence_boundary_and_message() -> None:
 
 
 def test_execute_success_and_tool_error(registry) -> None:
-    ok = execute(ToolCall(name="calculator", arguments={"expression": "2+2"}), registry,
-                 AgentConfig())
+    ok = execute(
+        ToolCall(name="calculator", arguments={"expression": "2+2"}), registry, AgentConfig()
+    )
     assert ok.success and ok.output == "4"
-    fail = execute(ToolCall(name="calculator", arguments={"expression": "1/0"}), registry,
-                   AgentConfig())
+    fail = execute(
+        ToolCall(name="calculator", arguments={"expression": "1/0"}), registry, AgentConfig()
+    )
     assert not fail.success and fail.error
 
 

@@ -3,6 +3,19 @@ name = "agent-runtime"
 version = "0.1.0"
 description = "Local-first natural-language agent runtime: reasoning LLM + Needle tool-calling model"
 readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Katorin", email = "anmolpoonam41@gmail.com" }]
+keywords = ["agent", "tool-calling", "llm", "langgraph", "needle", "local-first"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "langgraph>=1.2,<1.3",
@@ -19,6 +32,12 @@ dev = [
     "pytest-asyncio>=1,<2",
     "ruff>=0.12,<1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/baka-onii/needle-agent"
+Repository = "https://github.com/baka-onii/needle-agent"
+Issues = "https://github.com/baka-onii/needle-agent/issues"
+Specification = "https://github.com/baka-onii/needle-agent/blob/main/docs/spec-v0.md"
 
 [build-system]
 requires = ["hatchling"]

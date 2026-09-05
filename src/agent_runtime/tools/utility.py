@@ -24,8 +24,10 @@ _UNARY_OPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 def _eval(node: ast.AST) -> int | float:
     if isinstance(node, ast.Expression):
         return _eval(node.body)
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(
-        node.value, bool
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, (int, float))
+        and not isinstance(node.value, bool)
     ):
         return node.value
     if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
