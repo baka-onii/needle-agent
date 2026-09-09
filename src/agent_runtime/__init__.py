@@ -2,7 +2,17 @@
 
 from agent_runtime.agent import Agent
 from agent_runtime.config import AgentConfig
+from agent_runtime.models.streaming import ModelDelta
 from agent_runtime.tools.base import Tool, ToolCall, ToolError, ToolResult
 from agent_runtime.tools.registry import ToolRegistry
 
-__all__ = ["Agent", "AgentConfig", "Tool", "ToolCall", "ToolError", "ToolRegistry", "ToolResult"]
+__all__ = [
+    "Agent",
+    "AgentConfig",
+    "ModelDelta",
+    "Tool",
+    "ToolCall",
+    "ToolError",
+    "ToolRegistry",
+    "ToolResult",
+]

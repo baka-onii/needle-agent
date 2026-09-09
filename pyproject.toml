@@ -59,3 +59,9 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"config/defaults.toml" = "agent_runtime/defaults/defaults.toml"
+"config/prompts/reasoning.md" = "agent_runtime/defaults/prompts/reasoning.md"
+"config/prompts/translator.md" = "agent_runtime/defaults/prompts/translator.md"
+"config/prompts/confirmation.md" = "agent_runtime/defaults/prompts/confirmation.md"

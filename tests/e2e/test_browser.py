@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_runtime import AgentConfig
+from agent_runtime import Agent, AgentConfig
 from agent_runtime.server import WorkspaceService, make_server
 
 playwright = pytest.importorskip("playwright.sync_api")
@@ -19,13 +19,49 @@ expect = playwright.expect
 
 
 @pytest.fixture()
-def browser_page(tmp_path):
+def browser_page(tmp_path, request):
     root = tmp_path / "workspace"
     shutil.copytree(Path(__file__).parents[2] / "examples" / "workspace", root)
     (root / "untrusted.md").write_text(
         '<img src=x onerror="window.injected=true"><script>window.injected=true</script>'
     )
     service = WorkspaceService(AgentConfig(workspace_root=str(root)), demo=True)
+    if getattr(request, "param", None) == "selection-review":
+        from agent_runtime.models.action import NeedleResult
+
+        class ReviewReasoning:
+            turn = 0
+
+            def generate(self, messages):
+                if self.turn == 1:
+                    assert (
+                        "Is the highest-ranked available tool 'calculator' correct?"
+                        in messages[-1]["content"]
+                    )
+                response = [
+                    "<tool>Work out six times seven.</tool>",
+                    "<tool>Use calculator to calculate 6*7.</tool>",
+                    "<final>The result is 42.</final>",
+                ][self.turn]
+                self.turn += 1
+                return response
+
+        class ReviewTranslator:
+            turn = 0
+
+            def translate(self, action, tools):
+                self.turn += 1
+                return NeedleResult(
+                    selected_tool="calculator",
+                    arguments={"expression": "6*7"},
+                    confidence=0.2 if self.turn == 1 else 0.99,
+                )
+
+        service.agent_factory = lambda settings, run: Agent(
+            service.run_config(settings),
+            reasoning=ReviewReasoning(),
+            action=ReviewTranslator(),
+        )
     server = make_server(service, "127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -80,16 +116,13 @@ def test_search_inspection_reload_and_followup(browser_page):
     expect(page.locator(".history-row:not(.table-header)")).to_have_count(2)
 
 
-def test_question_and_approval_survive_reload(browser_page):
+def test_question_and_write_survive_reload(browser_page):
     page, root = browser_page
     page.locator('[data-prompt="Create a note"]').click()
     expect(page.locator(".pending-card")).to_contain_text("What would you like me to write")
     page.reload()
     expect(page.locator(".pending-card")).to_contain_text("What would you like me to write")
     send(page, "A useful note from the browser.")
-    expect(page.locator(".pending-card")).to_contain_text("Your permission is needed")
-    assert not (root / "note.txt").exists()
-    page.get_by_role("button", name="Allow write", exact=True).click()
     expect(page.locator(".assistant-body > .markdown")).to_contain_text("Wrote and verified")
     assert (root / "note.txt").read_text() == "A useful note from the browser."
     expect(page.locator(".message-meta")).to_contain_text("3 tool steps")
@@ -98,13 +131,12 @@ def test_question_and_approval_survive_reload(browser_page):
     assert download.value.suggested_filename.startswith("needle-run-")
 
 
-def test_denial_and_cancellation(browser_page):
+def test_write_completes_without_approval_and_cancellation(browser_page):
     page, root = browser_page
-    send(page, 'Write "do not write this" to denied.txt')
-    expect(page.locator(".pending-card")).to_contain_text("Allow writing to denied.txt")
-    page.get_by_role("button", name="Deny", exact=True).click()
-    expect(page.locator(".message-meta")).to_contain_text("0 tool steps")
-    assert not (root / "denied.txt").exists()
+    send(page, 'Write "goes straight through" to direct.txt')
+    expect(page.locator(".assistant-body > .markdown")).to_contain_text("Wrote and verified")
+    expect(page.locator(".message-meta")).to_contain_text("tool steps")
+    assert (root / "direct.txt").exists()
     page.locator("#new-session").click()
     send(page, "Create a note")
     expect(page.locator(".pending-card")).to_be_visible()
@@ -121,7 +153,7 @@ def test_files_tools_and_settings(browser_page):
     page.locator('[data-file-path="src/auth.py"]').click()
     expect(page.locator(".file-content")).to_contain_text("def authenticate_user")
     page.locator('[data-view="tools"]').click()
-    expect(page.locator(".tool-catalog-card")).to_have_count(7)
+    expect(page.locator(".tool-catalog-card")).to_have_count(33)
     page.locator('.tool-catalog-card[data-tool="write_file"]').click()
     expect(page.locator("#detail-dialog")).to_be_visible()
     expect(page.locator(".parameter-table")).to_contain_text("content")
@@ -174,3 +206,150 @@ def test_mobile_navigation_and_chat(browser_page):
     page.locator("#mode-badge").click()
     expect(page.locator("#settings-dialog")).to_be_visible()
     assert page.locator("#settings-dialog").bounding_box()["width"] < 390
+
+
+def test_theme_respects_system_then_persists_explicit_choice(browser_page):
+    page, _ = browser_page
+    page.emulate_media(color_scheme="dark")
+    expect(page.locator("html")).to_have_attribute("data-theme", "dark")
+    expect(page.get_by_role("button", name="Switch to light mode")).to_be_visible()
+    assert (
+        page.locator(".composer").evaluate("e => getComputedStyle(e).backgroundColor")
+        == "rgb(28, 42, 34)"
+    )
+    page.get_by_role("button", name="Switch to light mode").click()
+    expect(page.locator("html")).to_have_attribute("data-theme", "light")
+    page.reload()
+    expect(page.locator("#runtime-status")).to_contain_text("Runtime ready")
+    expect(page.locator("html")).to_have_attribute("data-theme", "light")
+    page.get_by_role("button", name="Switch to dark mode").click()
+    page.reload()
+    expect(page.locator("html")).to_have_attribute("data-theme", "dark")
+    page.locator("#open-settings").click()
+    assert (
+        page.locator("#settings-dialog").evaluate("e => getComputedStyle(e).backgroundColor")
+        == "rgb(28, 42, 34)"
+    )
+
+
+def test_delete_conversations_cancels_cleanly_and_survives_reload(browser_page):
+    page, _ = browser_page
+    send(page, "Calculate 2+2")
+    expect(page.locator(".message-meta")).to_contain_text("Completed")
+    page.locator("#new-session").click()
+    send(page, "Calculate 3+3")
+    expect(page.locator(".message-meta")).to_contain_text("Completed")
+    expect(page.locator(".recent-row")).to_have_count(2)
+    page.get_by_role("button", name="Delete conversation: Calculate 2+2", exact=True).click()
+    page.locator("#delete-dialog").get_by_role("button", name="Cancel", exact=True).click()
+    expect(page.locator(".recent-row")).to_have_count(2)
+    expect(page.locator(".assistant-body > .markdown")).to_contain_text("6")
+    page.get_by_role("button", name="Delete conversation: Calculate 2+2", exact=True).click()
+    page.locator("#confirm-delete").click()
+    expect(page.locator("#delete-dialog")).not_to_be_visible()
+    expect(page.locator(".recent-row")).to_have_count(1)
+    expect(page.locator(".assistant-body > .markdown")).to_contain_text("6")
+    page.locator('[data-view="history"]').click()
+    expect(page.locator(".history-row:not(.table-header)")).to_have_count(1)
+    page.reload()
+    expect(page.locator(".recent-row")).to_have_count(1)
+    page.locator(".recent-delete").click()
+    page.locator("#confirm-delete").click()
+    expect(page.locator("#welcome")).to_be_visible()
+    expect(page.locator(".recent-row")).to_have_count(0)
+    expect(page.locator(".message")).to_have_count(0)
+    page.reload()
+    expect(page.locator("#welcome")).to_be_visible()
+    expect(page.locator(".recent-row")).to_have_count(0)
+
+
+def test_delete_waits_for_active_run_and_never_deletes_written_files(browser_page):
+    page, root = browser_page
+    send(page, 'Write "keep the contents" to keep.txt')
+    expect(page.locator(".assistant-body > .markdown")).to_contain_text("Wrote and verified")
+    expect(page.locator(".message-meta")).to_contain_text("Completed")
+    expect(page.locator(".recent-delete")).to_be_enabled()
+    page.locator(".recent-delete").click()
+    expect(page.locator("#delete-dialog")).to_contain_text("Workspace files are not deleted")
+    page.locator("#confirm-delete").click()
+    expect(page.locator("#welcome")).to_be_visible()
+    assert (root / "keep.txt").read_text() == "keep the contents"
+
+
+def test_prompts_and_limits_save_reload_export_and_import(browser_page):
+    page, _ = browser_page
+    page.locator("#open-settings").click()
+    page.locator(".prompt-settings > summary").click()
+    page.locator("#reasoning-prompt").fill("Custom reasoning instructions: use one tool at a time.")
+    page.locator("#translator-prompt").fill(
+        "Custom translation instructions: preserve the payload."
+    )
+    page.locator("#confirmation-prompt").fill("Custom review: is the highest-ranked tool correct?")
+    page.locator(".model-settings > summary").click()
+    page.locator("#needle-max-tokens").fill("3072")
+    page.locator("#llm-max-tokens").fill("5000")
+    page.locator("#save-settings").click()
+    expect(page.locator("#settings-dialog")).not_to_be_visible()
+    page.reload()
+    expect(page.locator("#runtime-status")).to_contain_text("Runtime ready")
+    page.locator("#open-settings").click()
+    page.locator(".prompt-settings > summary").click()
+    expect(page.locator("#reasoning-prompt")).to_have_value(
+        "Custom reasoning instructions: use one tool at a time."
+    )
+    expect(page.locator("#confirmation-prompt")).to_have_value(
+        "Custom review: is the highest-ranked tool correct?"
+    )
+    with page.expect_download() as download:
+        page.locator("#export-settings").click()
+    content = Path(download.value.path()).read_text()
+    assert "Custom translation instructions" in content and "needle_max_tokens = 3072" in content
+    assert "llm_api_key" not in content and "workspace_root" not in content
+    page.locator("#config-file").set_input_files(
+        {
+            "name": "import.toml",
+            "mimeType": "text/plain",
+            "buffer": b"[runtime]\nmax_tool_steps = 9\n[prompts]\n"
+            b'reasoning_prompt = "Imported instructions"\n',
+        }
+    )
+    expect(page.locator("#connection-result")).to_contain_text("imported and applied")
+    expect(page.locator("#reasoning-prompt")).to_have_value("Imported instructions")
+    page.locator("#settings-dialog .dialog-close").click()
+    expect(page.locator("#step-limit")).to_contain_text("9 steps")
+    send(page, "Calculate 6*7")
+    expect(page.locator(".assistant-body > .markdown")).to_contain_text("42")
+
+
+def test_mobile_dark_theme_configuration_and_delete(browser_page):
+    page, _ = browser_page
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.get_by_role("button", name="Switch to dark mode").click()
+    expect(page.locator("html")).to_have_attribute("data-theme", "dark")
+    send(page, "Calculate 9*9")
+    expect(page.locator(".message-meta")).to_contain_text("Completed")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.locator("#mode-badge").click()
+    page.locator(".prompt-settings > summary").click()
+    expect(page.locator("#reasoning-prompt")).to_be_visible()
+    assert page.locator("#settings-dialog").bounding_box()["width"] < 390
+    page.locator("#settings-dialog .dialog-close").click()
+    page.locator("#menu-button").click()
+    page.locator(".recent-delete").click()
+    page.locator("#confirm-delete").click()
+    expect(page.locator(".recent-row")).to_have_count(0)
+    expect(page.locator("#delete-dialog")).not_to_be_visible()
+
+
+@pytest.mark.parametrize("browser_page", ["selection-review"], indirect=True)
+def test_candidate_confirmation_is_visible_and_returns_through_reasoning(browser_page):
+    page, _ = browser_page
+    send(page, "Multiply six and seven")
+    expect(page.locator(".assistant-body > .markdown")).to_contain_text("42")
+    expect(page.locator(".message-meta")).to_contain_text("1 tool step")
+    expect(page.locator(".tool-card")).to_have_count(2)
+    page.locator(".tool-card summary").first.click()
+    expect(page.locator(".selection-review")).to_contain_text("Is calculator the correct tool?")
+    expect(page.locator(".selection-review")).to_contain_text("0.20")
+    expect(page.locator(".tool-card").first).to_contain_text("not executed")
+    expect(page.locator(".phase-list")).to_contain_text("Request selection review")

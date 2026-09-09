@@ -1,0 +1,41 @@
+filesystem.py (9)
+1. read_file(path: str) — required: path
+2. read_directory(path: str = ".") — required: [] (all optional)
+3. search_files(query: str, path: str = ".") — required: query
+4. write_file(path: str, content: str) — required: path, content
+5. file_info(path: str) — required: path
+6. create_directory(path: str) — required: path
+7. move_file(source: str, destination: str) — required: source, destination
+8. copy_file(source: str, destination: str) — required: source, destination
+9. delete_file(path: str) — required: path
+editing.py (4)
+10. replace_text(path: str, old_text: str, new_text: str, count: int = 1) — required: path, old_text, new_text
+11. insert_text(path: str, line: int, text: str) — required: path, line, text
+12. delete_text(path: str, start_line: int, end_line: int) — required: path, start_line, end_line
+13. apply_patch(path: str, patch: str) — required: path, patch
+execution.py (3)
+14. run_python(code: str, timeout_s: int = 30) — required: code
+15. run_powershell(command: str, timeout_s: int = 30) — required: command
+16. run_process(command: str, timeout_s: int = 30) — required: command
+git.py (8)
+17. git_status() — required: []
+18. git_diff(path: str = ".", revision: str = "") — required: []
+19. git_log(limit: int = 10, path: str = ".") — required: []
+20. git_show(revision: str, path: str = "") — required: revision
+21. git_branch_list() — required: []
+22. git_stage(paths: str) — required: paths (comma-separated string)
+23. git_commit(message: str) — required: message
+24. git_checkout(branch: str) — required: branch
+web.py (3)
+25. web_search(query: str, count: int = 5) — required: query
+26. web_open(url: str) — required: url
+27. web_extract(url: str) — required: url
+environment.py (3)
+28. get_working_directory() — required: []
+29. find_executable(name: str) — required: name
+30. process_info(pid: int | None = None) — required: []
+utility.py (2)
+31. calculator(expression: str) — required: expression
+32. get_time(timezone: str | None = None) — required: []
+interaction.py (1)
+33. ask_user(question: str) — required: question

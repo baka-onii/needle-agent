@@ -13,6 +13,7 @@ needle_tool_index/
 .env.*
 !.env.example
 *.gguf
+*.log
 bench_results*.jsonl
 playwright-report/
 test-results/

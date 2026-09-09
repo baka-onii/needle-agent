@@ -12,6 +12,8 @@ const esc = (value) =>
   );
 const icon = (name, tiny = false) =>
   `<svg class="icon${tiny ? " tiny" : ""}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+const { PacedText, reconcile } = NeedleStreaming;
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const toolIcons = {
   read_file: "file",
   read_directory: "folder",
@@ -37,6 +39,7 @@ const phases = [
   "sanitize",
   "validate",
   "confidence",
+  "confirm",
   "safety",
   "execute",
   "observe",
@@ -49,6 +52,7 @@ const phaseNames = {
   sanitize: "Sanitize call",
   validate: "Validate arguments",
   confidence: "Confidence gate",
+  confirm: "Request selection review",
   safety: "Safety & permissions",
   execute: "Execute tool",
   observe: "Observe result",
@@ -103,7 +107,40 @@ const S = {
   fileLoading: false,
   fileFilter: "",
   fileLoadSequence: 0,
+  conversationLoadSequence: 0,
+  deletedConversations: new Set(),
+  deleteTarget: null,
+  animating: new Set(),
+  streamDirty: new Set(),
 };
+
+const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+function applyTheme(theme, persist = true) {
+  document.documentElement.dataset.theme = theme;
+  if (persist) stored("needle-theme", theme);
+  const next = theme === "dark" ? "light" : "dark";
+  const button = $("#theme-toggle");
+  button.innerHTML = icon(next === "light" ? "sun" : "moon");
+  button.setAttribute("aria-label", `Switch to ${next} mode`);
+  button.title = `Switch to ${next} mode`;
+  $('meta[name="theme-color"]').content =
+    theme === "dark" ? "#17231d" : "#f8f9f6";
+}
+systemTheme.addEventListener("change", (event) => {
+  if (!["light", "dark"].includes(stored("needle-theme")))
+    applyTheme(event.matches ? "dark" : "light", false);
+});
+window.addEventListener("storage", (event) => {
+  if (event.key === "needle-theme")
+    applyTheme(
+      ["light", "dark"].includes(event.newValue)
+        ? event.newValue
+        : systemTheme.matches
+          ? "dark"
+          : "light",
+      false,
+    );
+});
 
 async function api(path, options = {}) {
   const headers = { "Content-Type": "application/json" };
@@ -157,39 +194,68 @@ function inlineMarkdown(text) {
     .replace(/`([^`\n]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
 }
-function markdown(text) {
-  const chunks = String(text).split(/(```[^\n]*\n[\s\S]*?```)/g);
-  return chunks
-    .map((chunk) => {
-      if (chunk.startsWith("```")) {
-        const newline = chunk.indexOf("\n");
-        const language = chunk.slice(3, newline).trim() || "text";
-        const code = chunk.slice(newline + 1, -3).replace(/\n$/, "");
-        return `<div class="code-block"><div class="code-block-header"><span>${esc(language)}</span><button class="icon-button copy-code" aria-label="Copy code">${icon("copy")}</button></div><pre><code>${esc(code)}</code></pre></div>`;
-      }
+function markdown(text, streaming = false) {
+  const blocks = [];
+  let prose = [],
+    fence = null,
+    code = [],
+    language = "text";
+  const flushProse = () => {
+    if (prose.length) blocks.push({ prose: prose.join("\n") });
+    prose = [];
+  };
+  for (const line of String(text).split("\n")) {
+    const opening = line.match(/^[ \t]{0,3}(`{3,}|~{3,})(.*)$/);
+    if (!fence && opening) {
+      flushProse();
+      fence = opening[1];
+      language = opening[2].trim() || "text";
+      code = [];
+    } else if (
+      fence &&
+      line.trim().length >= fence.length &&
+      [...line.trim()].every((char) => char === fence[0])
+    ) {
+      blocks.push({ code: code.join("\n"), language, closed: true });
+      fence = null;
+    } else if (fence) code.push(line);
+    else prose.push(line);
+  }
+  if (fence) blocks.push({ code: code.join("\n"), language, closed: false });
+  flushProse();
+  return blocks
+    .map((block, index) => {
+      if (block.code !== undefined)
+        return `<div class="code-block${streaming && !block.closed ? " code-streaming" : ""}" data-render-key="code-${index}"><div class="code-block-header"><span>${esc(block.language)}</span><button class="icon-button copy-code" aria-label="Copy code">${icon("copy")}</button></div><pre><code>${esc(block.code)}</code></pre></div>`;
       let html = "",
         paragraph = [],
-        list = [];
+        list = [],
+        ordered = false;
       const flushParagraph = () => {
         if (paragraph.length)
           html += `<p>${inlineMarkdown(paragraph.join("\n"))}</p>`;
         paragraph = [];
       };
       const flushList = () => {
-        if (list.length)
-          html += `<ul>${list.map((line) => `<li>${inlineMarkdown(line)}</li>`).join("")}</ul>`;
+        if (list.length) {
+          const tag = ordered ? "ol" : "ul";
+          html += `<${tag}>${list.map((line) => `<li>${inlineMarkdown(line)}</li>`).join("")}</${tag}>`;
+        }
         list = [];
       };
-      for (const line of chunk.split("\n")) {
-        if (/^#{1,4}\s/.test(line)) {
+      for (const line of block.prose.split("\n")) {
+        const heading = line.match(/^(#{1,4})\s+(.*)/);
+        const item = line.match(/^\s*(?:([-*])|\d+[.)])\s+(.*)/);
+        if (heading) {
           flushParagraph();
           flushList();
-          const heading = line.match(/^(#{1,4})\s+(.*)/);
           const tag = heading[1].length < 2 ? "h2" : "h3";
           html += `<${tag}>${inlineMarkdown(heading[2])}</${tag}>`;
-        } else if (/^\s*[-*]\s/.test(line)) {
+        } else if (item) {
           flushParagraph();
-          list.push(line.replace(/^\s*[-*]\s+/, ""));
+          if (list.length && ordered !== !item[1]) flushList();
+          ordered = !item[1];
+          list.push(item[2]);
         } else if (!line.trim()) {
           flushParagraph();
           flushList();
@@ -292,7 +358,7 @@ function renderSidebar() {
     ? conversations
         .map(
           (c) =>
-            `<button class="recent-item${c.id === S.conversation?.id ? " selected" : ""}" data-conversation="${esc(c.id)}" title="${esc(c.title)}">${icon("chat")}<span>${esc(c.title)}</span></button>`,
+            `<div class="recent-row"><button class="recent-item${c.id === S.conversation?.id ? " selected" : ""}" data-conversation="${esc(c.id)}" title="${esc(c.title)}">${icon("chat")}<span>${esc(c.title)}</span></button><button class="recent-delete" data-delete-conversation="${esc(c.id)}" aria-label="Delete conversation: ${esc(c.title)}" ${[...S.runs.values()].some((run) => run.conversation_id === c.id && !run.done) ? 'disabled title="Stop the run before deleting"' : 'title="Delete conversation"'}>${icon("trash", true)}</button></div>`,
         )
         .join("")
     : '<div class="recent-empty">A fresh start.<br>Your conversations will appear here.</div>';
@@ -332,12 +398,107 @@ function selectInspector(tab) {
   }
   if (tab === "activity") renderActivity();
 }
+function modelsFor(run) {
+  if (!run.models) {
+    run.models = new Map();
+    for (const event of run.events || []) reduceModelEvent(run, event, true);
+  }
+  return run.models;
+}
+function reduceModelEvent(run, event, replay = false) {
+  run.models ||= new Map();
+  const now = performance.now();
+  if (event.type === "model_start") {
+    run.models.set(event.model_id, {
+      ...event,
+      startId: event.id,
+      status: "receiving",
+      parts: new Map(),
+      raw: "",
+      providerReasoning: "",
+      expanded: false,
+      inspect: false,
+      done: false,
+    });
+    return;
+  }
+  if (event.type === "model_trace_limited") {
+    run.trace_limited = true;
+    for (const model of run.models.values()) {
+      model.trace_limited = true;
+      for (const part of model.parts.values()) part.pacer.finish(now, true);
+    }
+    return;
+  }
+  const model = run.models.get(event.model_id);
+  if (!model) return;
+  model.dirty = true;
+  if (event.type === "model_status") {
+    model.streamed = event.streamed;
+    if (!model.streamed)
+      for (const part of model.parts.values()) {
+        part.pacer.smooth = false;
+        part.pacer.flush();
+      }
+  }
+  if (event.type === "model_delta") {
+    if (event.channel === "reasoning") model.providerReasoning += event.delta;
+    else model.raw += event.delta;
+    for (const update of event.parts || []) {
+      const index = String(update.index);
+      let part = model.parts.get(index);
+      if (!part) {
+        part = {
+          index,
+          kind: update.kind,
+          complete: false,
+          pacer: new PacedText({
+            bufferMs: model.buffer_ms,
+            maxLagMs: model.max_lag_ms,
+            smooth: model.streamed && !reducedMotion.matches,
+          }),
+        };
+        model.parts.set(index, part);
+      }
+      part.pacer.append(update.text, now, event.elapsed_ms);
+      if (Object.hasOwn(update, "complete")) {
+        part.complete = update.complete;
+        part.pacer.finish(now, replay);
+      }
+      if (replay) {
+        part.pacer.flush();
+        part.pacer.firstAt = now - part.pacer.bufferMs;
+      }
+    }
+  }
+  if (event.type === "model_end") {
+    Object.assign(model, event, { done: true });
+    for (const part of model.parts.values())
+      part.pacer.finish(
+        now,
+        replay || !model.streamed || model.status !== "completed",
+      );
+  }
+  if (!replay) {
+    S.animating.add(run.id);
+    S.streamDirty.add(run.id);
+  }
+}
+function flushModel(run, id) {
+  const model = modelsFor(run).get(id);
+  if (model) {
+    for (const part of model.parts.values()) part.pacer.flush();
+    model.dirty = true;
+  }
+}
 function actionGroups(run) {
+  if (run.groupCache && run.groupVersion === (run.toolVersion || 0))
+    return run.groupCache;
   const groups = [];
   let group;
   for (const event of run.events || []) {
     if (event.type === "action") {
-      group = { id: event.id, action: event.action };
+      group = { id: event.id, action: event.action, modelId: event.model_id };
       groups.push(group);
     }
     if (!group) continue;
@@ -347,8 +508,141 @@ function actionGroups(run) {
     if (event.type === "tool_start") group.call = event;
     if (event.type === "tool_result") group.result = event;
     if (event.type === "rejected") group.rejected = event;
+    if (event.type === "confirmation") group.review = event;
   }
+  run.groupCache = groups;
+  run.groupVersion = run.toolVersion || 0;
   return groups;
+}
+function modelConversation(model) {
+  if (!model.inspect) return "";
+  const messages = model.input_messages || [];
+  return `<div class="model-conversation" data-render-key="${esc(model.model_id)}-conversation"><p class="model-note">Exact text sent through this adapter. Request headers and provider credentials are not included.</p>${model.inputs_captured && !model.trace_limited ? messages.map((message, index) => `<details class="model-message" data-render-key="${esc(model.model_id)}-input-${index}"><summary><span>${esc(message.role)}</span><small>${message.content.length.toLocaleString()} characters</small></summary><pre>${esc(message.content)}</pre></details>`).join("") : '<p class="model-note">Input capture is disabled or the trace limit was reached.</p>'}<details class="model-message" data-render-key="${esc(model.model_id)}-raw"><summary><span>${model.component === "translator" ? "Translation result" : "Raw response"}</span><small>${model.raw.length.toLocaleString()} characters</small></summary><pre class="model-raw">${esc(model.raw || "No response text received yet.")}</pre></details>${model.providerReasoning ? `<details class="model-message" data-render-key="${esc(model.model_id)}-provider-reasoning"><summary><span>Provider reasoning text</span></summary><pre class="model-provider-reasoning">${esc(model.providerReasoning)}</pre></details>` : ""}</div>`;
+}
+function modelOutputHTML(model) {
+  const parts = [...model.parts.values()];
+  const structured = parts.some((part) =>
+    ["tool", "final"].includes(part.kind),
+  );
+  const text = parts
+    .filter(
+      (part) =>
+        part.kind === "reasoning" ||
+        (part.kind === "text" &&
+          (model.component === "translator" || structured)),
+    )
+    .map((part) => part.pacer.text)
+    .join("\n\n");
+  if (text)
+    return model.component === "translator"
+      ? `<pre class="model-output">${esc(text)}</pre>`
+      : `<div class="markdown model-output">${markdown(text, !model.done)}</div>`;
+  return `<p class="model-note">${!model.done ? (model.component === "translator" ? "This translator returns its result in one piece. Waiting for completion…" : "Waiting for model commentary or provider-exposed reasoning…") : "No separate reasoning text was returned. Inspect the conversation or response below."}</p>`;
+}
+function modelStats(model) {
+  const tokens = model.usage?.completion_tokens;
+  const outputSize = (
+    model.output_chars ?? model.raw.length + model.providerReasoning.length
+  ).toLocaleString();
+  return `${tokens !== undefined ? `${tokens.toLocaleString()} tokens` : `${outputSize} characters`}${model.duration_ms !== undefined ? ` · ${duration(model.duration_ms)}` : ""}`;
+}
+function renderModelCard(model, run) {
+  const translator = model.component === "translator";
+  const busy = !model.done && !model.trace_limited;
+  const status = model.trace_limited
+    ? "Trace limited"
+    : busy
+      ? model.streamed
+        ? "Streaming"
+        : "Waiting"
+      : model.status === "completed"
+        ? "Complete"
+        : model.status === "cancelled"
+          ? "Stopped"
+          : "Interrupted";
+  return `<details class="model-card ${translator ? "translator-card" : "reasoning-card"}" data-render-key="${esc(run.id)}-${esc(model.model_id)}" data-model-run="${esc(run.id)}" data-model-id="${esc(model.model_id)}"><summary>${busy ? '<span class="model-stream-dot"></span>' : icon(translator ? "chip" : "spark", true)}<span class="model-card-title">${translator ? "Translator" : "Reasoning"}${translator ? "" : ` <small>· ${model.turn}</small>`}</span><span class="model-card-state">${status}</span>${icon("chevron", true)}</summary><div class="model-card-body"><div class="model-toolbar"><span>${esc(model.model)} · ${model.streamed ? (run.mode === "demo" ? "simulated stream" : "live text") : "buffered response"}</span><button class="text-button model-resize" data-model-id="${esc(model.model_id)}" data-model-run="${esc(run.id)}" aria-expanded="${Boolean(model.expanded)}">${model.expanded ? "Shrink" : "Expand"}</button></div><div class="model-scroll${model.expanded ? " expanded" : ""}" data-render-key="${esc(model.model_id)}-scroll"><div class="model-output-content">${modelOutputHTML(model)}</div>${model.error ? `<p class="model-error">${esc(model.error)}</p>` : ""}${model.trace_limited ? '<p class="model-note">The model trace was capped. Tool results and the final answer remain available.</p>' : ""}</div><div class="model-footer"><button class="text-button model-inspect" data-model-id="${esc(model.model_id)}" data-model-run="${esc(run.id)}" aria-expanded="${Boolean(model.inspect)}">${icon("chat", true)}${model.inspect ? "Hide conversation" : "Model conversation"}</button><span class="model-stats">${modelStats(model)}</span></div>${modelConversation(model)}</div></details>`;
+}
+function draftTool(model, part, run) {
+  const interrupted = model.done && model.status !== "completed";
+  const ignored =
+    model.done &&
+    (model.decision === "final" ||
+      part !== [...model.parts.values()].find((item) => item.kind === "tool"));
+  const label =
+    interrupted || ignored
+      ? "not executed"
+      : model.done
+        ? "awaiting validation"
+        : "drafting";
+  return `<details class="tool-card draft-tool" data-event-key="${esc(run.id)}-tool-${esc(model.model_id)}-${part.index}"><summary>${icon("tools")}<span class="tool-card-title">Tool request</span><span class="tool-card-status">${label}</span>${icon("chevron")}</summary><div class="tool-card-body"><div class="tool-detail-label">Draft intent · not an executable call</div><pre data-draft-model="${esc(model.model_id)}" data-draft-part="${part.index}">${esc(part.pacer.text || "Receiving the instruction…")}</pre><p class="model-note">${interrupted ? "The response was interrupted. This draft was not executed." : ignored ? "This draft was not selected for execution." : "The complete response must finish before translation, validation, confidence, and permission checks."}</p></div></details>`;
+}
+function renderTimeline(run) {
+  const models = [...modelsFor(run).values()].filter(
+    (model) => model.component === "reasoning",
+  );
+  const groups = actionGroups(run);
+  if (!models.length)
+    return groups.map((group) => renderToolCard(group, run)).join("");
+  const rendered = new Set();
+  let html = "";
+  for (const model of models) {
+    html += renderModelCard(model, run);
+    const related = groups.filter((group) => group.modelId === model.model_id);
+    const drafts = [...model.parts.values()].filter(
+      (part) => part.kind === "tool",
+    );
+    for (const part of drafts) {
+      const group = related.find(
+        (item) =>
+          !rendered.has(item) &&
+          item.action.trim() === part.pacer.received.trim(),
+      );
+      if (group) {
+        group.partIndex = part.index;
+        rendered.add(group);
+        html += renderToolCard(group, run);
+      } else html += draftTool(model, part, run);
+    }
+    for (const group of related)
+      if (!rendered.has(group)) {
+        rendered.add(group);
+        html += renderToolCard(group, run);
+      }
+  }
+  for (const group of groups)
+    if (!rendered.has(group)) html += renderToolCard(group, run);
+  return html;
+}
+function answerPreview(run, message) {
+  const model = [...modelsFor(run).values()]
+    .filter((item) => item.component === "reasoning")
+    .at(-1);
+  if (!model) return { text: message.content, streaming: false };
+  if (model.trace_limited && message.content)
+    return { text: message.content, streaming: false };
+  const parts = [...model.parts.values()];
+  const final = parts.find((part) => part.kind === "final");
+  const plain = !parts.some((part) => ["tool", "final"].includes(part.kind));
+  const sources = final
+    ? [final]
+    : plain
+      ? parts.filter((part) => part.kind === "text")
+      : [];
+  const text = sources
+    .map((part) => part.pacer.text)
+    .join("")
+    .trimStart();
+  const pending = sources.some((part) => part.pacer.pending);
+  if (run.done && run.status !== "COMPLETED")
+    return { text: message.content, partial: text, streaming: false };
+  if (model.done && model.decision === "final" && !pending)
+    return { text: message.content || model.answer || text, streaming: false };
+  if (!model.done || pending) return { text, streaming: sources.length > 0 };
+  return { text: message.content || "", streaming: false };
+}
+function renderSelectionReview(review) {
+  if (!review) return "";
+  return `<div class="selection-review"><div class="tool-detail-label">Reasoning model review</div><p>${review.suggested_tool ? `Is <strong>${esc(review.suggested_tool)}</strong> the correct tool?` : "Choose the correct registered tool."}</p>${review.candidates.length ? `<ul>${review.candidates.map((candidate) => `<li>${esc(candidate.tool_name)} <span>${candidate.confidence.toFixed(2)}</span></li>`).join("")}</ul>` : ""}<p>The reasoning model must confirm or correct the selection in its next action. All gates still apply.</p></div>`;
 }
 function renderToolCard(group, run) {
   const name = group.call?.tool || group.translation?.selected_tool;
@@ -362,7 +656,22 @@ function renderToolCard(group, run) {
         : "error"
       : "in progress";
   const args = group.call?.arguments || group.translation?.arguments;
-  return `<details class="tool-card" data-event-key="${esc(run.id)}-${group.id}"><summary>${icon(toolIcons[name] || "spark")}<span class="tool-card-title">${esc(toolNames[name] || "Action requested")}</span><span class="tool-card-status${failed ? " error" : ""}">${esc(label)}</span>${icon("chevron")}</summary><div class="tool-card-body"><p>${esc(group.action)}</p>${args ? `<div class="tool-detail-label">${group.validated ? "Validated arguments" : "Proposed arguments"}${group.rejected ? " · not executed" : ""}</div><pre>${esc(JSON.stringify(args, null, 2))}</pre>` : ""}${group.result ? `<div class="tool-detail-label">${group.result.success ? "Tool observation" : "Tool error"}</div><pre>${esc(group.result.success ? group.result.output : group.result.error)}</pre>` : ""}${group.rejected ? `<div class="tool-detail-label">Blocked at ${esc(group.rejected.stage)}</div><pre>${esc(group.rejected.message)}</pre>` : ""}${score !== undefined ? `<div class="confidence-line">${run.mode === "demo" ? "Synthetic demo score" : "Needle confidence"}: ${Number(score).toFixed(2)}${group.confidence ? ` · gate ≥ ${Number(group.confidence.threshold).toFixed(2)}` : ""}</div>` : ""}</div></details>`;
+  const key = group.modelId
+    ? `${run.id}-tool-${group.modelId}-${group.partIndex ?? 0}`
+    : `${run.id}-${group.id}`;
+  const translator = [...modelsFor(run).values()].find(
+    (model) =>
+      model.component === "translator" && model.parent_id === group.modelId,
+  );
+  return `<details class="tool-card" data-event-key="${esc(key)}"><summary>${icon(toolIcons[name] || "spark")}<span class="tool-card-title">${esc(toolNames[name] || "Action requested")}</span><span class="tool-card-status${failed ? " error" : ""}">${esc(label)}</span>${icon("chevron")}</summary><div class="tool-card-body"><p>${esc(group.action)}</p>${args ? `<div class="tool-detail-label">${group.validated ? "Validated arguments" : "Proposed arguments"}${group.rejected ? " · not executed" : ""}</div><pre>${esc(JSON.stringify(args, null, 2))}</pre>` : ""}${group.result ? `<div class="tool-detail-label">${group.result.success ? "Tool observation" : "Tool error"}</div><pre>${esc(group.result.success ? group.result.output : group.result.error)}</pre>` : ""}${group.rejected ? `<div class="tool-detail-label">Blocked at ${esc(group.rejected.stage)}</div><pre>${esc(group.rejected.message)}</pre>` : ""}${renderSelectionReview(group.review)}${translator ? renderModelCard(translator, run) : ""}${score !== undefined ? `<div class="confidence-line">${run.mode === "demo" ? "Synthetic demo score" : "Needle confidence"}: ${Number(score).toFixed(2)}${group.confidence ? ` · gate ≥ ${Number(group.confidence.threshold).toFixed(2)}` : ""}</div>` : ""}</div></details>`;
+}
+function approvalPreview(call) {
+  if (!call || !call.arguments) return "(no details)";
+  const args = call.arguments;
+  const preview =
+    args.content ?? args.code ?? args.command ?? args.patch ?? args.message ?? args.question ?? args.path ?? args.source ?? args.branch ?? "";
+  const text = String(preview);
+  return text ? text : "(no details)";
 }
 function renderPending(run) {
   if (!run.pending || run.done) return "";
@@ -370,45 +679,59 @@ function renderPending(run) {
     approval = pending.kind === "approval";
   const disabled =
     run.status === "CANCELLING" || pending.submitted ? "disabled" : "";
-  return `<div class="pending-card"><div class="pending-title">${icon(approval ? "shield" : "chat")}${approval ? "Your permission is needed" : "A quick question for you"}</div><p>${esc(pending.question)}</p>${approval ? `<pre>${esc(pending.call?.arguments?.content || "(empty file)")}</pre><p class="pending-hint">This replaces the file’s contents. Nothing is written until you approve.</p><div class="pending-actions"><button class="button primary small" data-answer-run="${esc(run.id)}" data-approved="true" ${disabled}>${icon("check", true)}Allow write</button><button class="button secondary small" data-answer-run="${esc(run.id)}" data-approved="false" ${disabled}>Deny</button></div>` : '<p class="pending-hint">Type your answer in the message box below to continue.</p>'}</div>`;
+  const allowLabel = pending.call?.name === "write_file" ? "Allow write" : "Allow action";
+  return `<div class="pending-card"><div class="pending-title">${icon(approval ? "shield" : "chat")}${approval ? "Your permission is needed" : "A quick question for you"}</div><p>${esc(pending.question)}</p>${approval ? `<pre>${esc(approvalPreview(pending.call))}</pre><p class="pending-hint">Nothing runs until you approve.</p><div class="pending-actions"><button class="button primary small" data-answer-run="${esc(run.id)}" data-approved="true" ${disabled}>${icon("check", true)}${allowLabel}</button><button class="button secondary small" data-answer-run="${esc(run.id)}" data-approved="false" ${disabled}>Deny</button></div>` : '<p class="pending-hint">Type your answer in the message box below to continue.</p>'}</div>`;
 }
 function renderAssistant(message) {
   const run = S.runs.get(message.run_id);
   if (!run)
-    return `<article class="message assistant"><div class="assistant-label"><span class="assistant-mark">${icon("needle")}</span>Needle</div><div class="assistant-body"><div class="markdown">${markdown(message.content)}</div></div></article>`;
-  const groups = actionGroups(run);
-  const answers = (run.events || []).filter((e) => e.type === "user_answer");
+    return `<article class="message assistant" data-render-key="assistant-${esc(message.run_id)}"><div class="assistant-label"><span class="assistant-mark">${icon("needle")}</span>Needle</div><div class="assistant-body"><div class="markdown">${markdown(message.content)}</div></div></article>`;
+  const timeline = renderTimeline(run);
+  const answers = (run.events || []).filter(
+    (event) => event.type === "user_answer",
+  );
   const pending = renderPending(run);
+  const preview = answerPreview(run, message);
   const working =
-    !run.done && !run.pending
-      ? `<div class="working"><span class="spinner"></span><span>${S.streamError && S.streamRun === run.id ? "Connection interrupted. Reconnecting…" : run.status === "CANCELLING" ? "Stopping after the current model call…" : `${esc(phaseNames[run.phase] || "Starting the agent")}…`}</span></div>`
+    !run.done && !run.pending && !preview.text
+      ? `<div class="working" data-render-key="working"><span class="spinner"></span><span>${S.streamError && S.streamRun === run.id ? "Connection interrupted. Reconnecting…" : run.status === "CANCELLING" ? "Stopping the current model stream…" : `${esc(phaseNames[run.phase] || "Starting the agent")}…`}</span></div>`
       : "";
-  return `<article class="message assistant" data-message-run="${esc(run.id)}"><div class="assistant-label"><span class="assistant-mark">${icon("needle")}</span>Needle<span class="label-mode">${run.mode === "demo" ? "DEMO" : "LIVE"}</span></div><div class="assistant-body">${groups.length ? `<div class="tool-stack">${groups.map((g) => renderToolCard(g, run)).join("")}</div>` : ""}${answers.map((e) => `<div class="answered-note">${e.kind === "approval" ? `You ${e.answer ? "approved" : "declined"} the write.` : `You: ${esc(e.answer)}`}</div>`).join("")}${pending}${working}${message.content ? `<div class="markdown">${markdown(message.content)}</div>` : ""}${run.done ? `<div class="message-meta">${statusBadge(run.status)}<span>${run.steps} tool ${run.steps === 1 ? "step" : "steps"}</span><span>·</span><span>${duration(run.elapsed_ms)}</span><span class="meta-spacer"></span><button class="icon-button inspect-run" data-run="${esc(run.id)}" aria-label="Inspect run">${icon("history")}</button><button class="icon-button copy-answer" data-run="${esc(run.id)}" aria-label="Copy answer">${icon("copy")}</button></div>` : ""}</div></article>`;
+  return `<article class="message assistant" data-render-key="assistant-${esc(run.id)}" data-message-run="${esc(run.id)}"><div class="assistant-label"><span class="assistant-mark">${icon("needle")}</span>Needle<span class="label-mode">${run.mode === "demo" ? "DEMO" : "LIVE"}</span></div><div class="assistant-body">${timeline ? `<div class="tool-stack model-timeline" data-render-key="timeline">${timeline}</div>` : ""}${answers.map((event) => `<div class="answered-note" data-render-key="answer-${event.id}">${event.kind === "approval" ? `You ${event.answer ? "approved" : "declined"} the write.` : `You: ${esc(event.answer)}`}</div>`).join("")}${pending}${working}${run.trace_limited ? '<p class="model-note trace-warning" data-render-key="trace-warning">Model trace limit reached. Further model text is omitted; tool results and the final answer are still retained.</p>' : ""}${preview.partial ? `<div class="partial-response" data-render-key="partial"><p class="model-note">Partial response · generation did not complete</p><div class="markdown">${markdown(preview.partial)}</div></div>` : ""}${preview.text || preview.streaming ? `<div class="markdown${preview.streaming ? " streaming-answer" : ""}" data-render-key="answer-output" aria-busy="${preview.streaming}">${markdown(preview.text, preview.streaming)}</div>` : ""}${run.done ? `<div class="message-meta" data-render-key="meta">${statusBadge(run.status)}<span>${run.steps} tool ${run.steps === 1 ? "step" : "steps"}</span><span>·</span><span>${duration(run.elapsed_ms)}</span><span class="meta-spacer"></span><button class="icon-button inspect-run" data-run="${esc(run.id)}" aria-label="Inspect run">${icon("history")}</button><button class="icon-button copy-answer" data-run="${esc(run.id)}" aria-label="Copy answer">${icon("copy")}</button></div>` : ""}</div></article>`;
+}
+function preserveScroll(render, force = false) {
+  const scroll = $("#chat-scroll");
+  const following =
+    scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 90;
+  const modelScrolls = $$(".model-scroll", $("#conversation")).filter(
+    (node) => node.scrollHeight - node.scrollTop - node.clientHeight < 30,
+  );
+  render();
+  for (const node of modelScrolls)
+    if (node.isConnected) node.scrollTop = node.scrollHeight;
+  if (following || force) scroll.scrollTop = scroll.scrollHeight;
 }
 function renderConversation(forceScroll = false) {
-  const container = $("#conversation"),
-    scroll = $("#chat-scroll");
-  const nearBottom =
-    scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 110;
-  const openCards = new Set(
-    $$("details[open]", container).map((detail) => detail.dataset.eventKey),
-  );
   const messages = S.conversation?.messages || [];
   $("#welcome").classList.toggle("hidden", messages.length > 0);
-  container.innerHTML = messages
-    .map((message) =>
-      message.role === "user"
-        ? `<article class="message user"><div class="user-bubble">${esc(message.content)}</div></article>`
-        : renderAssistant(message),
-    )
-    .join("");
-  $$("details", container).forEach((detail) => {
-    if (openCards.has(detail.dataset.eventKey)) detail.open = true;
-  });
-  if (nearBottom || forceScroll) scroll.scrollTop = scroll.scrollHeight;
+  preserveScroll(
+    () =>
+      reconcile(
+        $("#conversation"),
+        messages
+          .map((message, index) =>
+            message.role === "user"
+              ? `<article class="message user" data-render-key="user-${esc(message.run_id || index)}"><div class="user-bubble">${esc(message.content)}</div></article>`
+              : renderAssistant(message),
+          )
+          .join(""),
+      ),
+    forceScroll,
+  );
   updateComposer();
 }
 let framePending = false;
+let streamFrame = null;
+let lastStreamPaint = 0;
 function scheduleRender() {
   if (framePending) return;
   framePending = true;
@@ -418,6 +741,87 @@ function scheduleRender() {
     renderActivity();
     if (S.view === "history") renderHistory();
   });
+}
+function paintStreamingRun(run) {
+  const article = $(`[data-message-run="${run.id}"]`);
+  if (!article) return;
+  for (const model of modelsFor(run).values()) {
+    if (!model.dirty) continue;
+    model.dirty = false;
+    const card = $(`.model-card[data-model-id="${model.model_id}"]`, article);
+    if (card) {
+      reconcile($(".model-output-content", card), modelOutputHTML(model));
+      $(".model-stats", card).textContent = modelStats(model);
+      const raw = $(".model-raw", card);
+      if (raw) {
+        reconcile(raw, esc(model.raw || "No response text received yet."));
+        $("summary small", raw.parentElement).textContent =
+          `${model.raw.length.toLocaleString()} characters`;
+      }
+      const reasoningRaw = $(".model-provider-reasoning", card);
+      if (reasoningRaw) reconcile(reasoningRaw, esc(model.providerReasoning));
+    }
+    for (const part of model.parts.values())
+      if (part.kind === "tool") {
+        const draft = $(
+          `[data-draft-model="${model.model_id}"][data-draft-part="${part.index}"]`,
+          article,
+        );
+        if (draft)
+          reconcile(
+            draft,
+            esc(part.pacer.text || "Receiving the instruction…"),
+          );
+      }
+  }
+  const message = S.conversation?.messages.find(
+    (item) => item.role === "assistant" && item.run_id === run.id,
+  );
+  if (!message) return;
+  const preview = answerPreview(run, message);
+  const answer = $('[data-render-key="answer-output"]', article);
+  if (answer) {
+    answer.classList.toggle("streaming-answer", preview.streaming);
+    answer.setAttribute("aria-busy", String(preview.streaming));
+    reconcile(answer, markdown(preview.text || "", preview.streaming));
+  } else if (preview.text || preview.streaming) scheduleRender();
+}
+function animateStreams(now) {
+  streamFrame = null;
+  for (const id of S.animating) {
+    const run = S.runs.get(id);
+    if (!run) {
+      S.animating.delete(id);
+      S.streamDirty.delete(id);
+      continue;
+    }
+    let pending = false;
+    for (const model of modelsFor(run).values())
+      for (const part of model.parts.values()) {
+        if (reducedMotion.matches) part.pacer.smooth = false;
+        if (part.pacer.tick(now)) {
+          model.dirty = true;
+          S.streamDirty.add(id);
+        }
+        pending ||= part.pacer.pending;
+      }
+    if (!pending) S.animating.delete(id);
+  }
+  if (S.streamDirty.size && now - lastStreamPaint >= 32) {
+    preserveScroll(() => {
+      for (const id of S.streamDirty) {
+        const run = S.runs.get(id);
+        if (run) paintStreamingRun(run);
+      }
+    });
+    S.streamDirty.clear();
+    lastStreamPaint = now;
+  }
+  if (S.animating.size || S.streamDirty.size)
+    streamFrame = requestAnimationFrame(animateStreams);
+}
+function wakeStreamRenderer() {
+  if (streamFrame === null) streamFrame = requestAnimationFrame(animateStreams);
 }
 function renderActivity() {
   const run = currentRun();
@@ -432,12 +836,15 @@ function renderActivity() {
   const events = run.events || [],
     seen = new Set(events.filter((e) => e.type === "phase").map((e) => e.node));
   const actions = events.filter((e) => e.type === "action");
+  const reviewRequested = events.some((e) => e.type === "confirmation");
+  if (reviewRequested) seen.add("confirm");
   const latestPhase = [...events]
     .reverse()
     .find((e) => e.type === "phase")?.node;
   const rejected = [...events].reverse().find((e) => e.type === "rejected");
   $("#activity-panel").innerHTML =
     `<div class="activity-summary">${statusBadge(run.status)}<span class="activity-mode">${run.mode === "demo" ? "DEMO RUN" : "LIVE RUN"}</span></div><div class="activity-metrics"><div class="activity-metric"><strong>${run.steps || 0}</strong><span>tool steps</span></div><div class="activity-metric"><strong>${duration(run.elapsed_ms || 0)}</strong><span>elapsed time</span></div></div><h4 class="activity-section-title">RUNTIME PIPELINE</h4><ol class="phase-list">${phases
+      .filter((phase) => phase !== "confirm" || reviewRequested)
       .map((phase) => {
         const active = !run.done && latestPhase === phase;
         const done = seen.has(phase) && !active;
@@ -448,9 +855,34 @@ function renderActivity() {
       )}</ol>${rejected ? `<p class="activity-note warn">An action was blocked at ${esc(rejected.stage)}. It did not reach tool execution.</p>` : ""}${run.mode === "demo" ? '<p class="activity-note">Demo adapters simulate reasoning and confidence. Files, calculations, permissions, and every pipeline step are real.</p>' : ""}${actions.length ? `<h4 class="activity-section-title">REQUESTED ACTIONS</h4><div class="activity-actions">${actions.map((event, i) => `<div class="activity-action"><p>${esc(event.action)}</p><small>ACTION ${i + 1} · ${duration(event.elapsed_ms)}</small></div>`).join("")}</div>` : ""}${run.done ? `<button class="button secondary small export-trace" data-run="${esc(run.id)}">${icon("code", true)}Export trace</button>` : ""}`;
 }
 function applyEvent(run, event) {
-  if ((run.events || []).some((previous) => previous.id === event.id)) return;
+  if (event.id <= (run.events?.at(-1)?.id || 0)) return;
+  modelsFor(run);
   run.events ||= [];
   run.events.push(event);
+  const previousParts = event.model_id
+    ? run.models.get(event.model_id)?.parts.size || 0
+    : 0;
+  reduceModelEvent(run, event);
+  const newPart =
+    event.model_id &&
+    (run.models.get(event.model_id)?.parts.size || 0) !== previousParts;
+  if (
+    [
+      "action",
+      "translation",
+      "validated",
+      "confidence",
+      "tool_start",
+      "tool_result",
+      "rejected",
+      "confirmation",
+    ].includes(event.type)
+  )
+    run.toolVersion = (run.toolVersion || 0) + 1;
+  if (event.type === "action") flushModel(run, event.model_id);
+  if (event.type === "question")
+    for (const model of modelsFor(run).values())
+      flushModel(run, model.model_id);
   run.elapsed_ms = event.elapsed_ms || run.elapsed_ms;
   if (event.type === "phase") run.phase = event.node;
   if (event.type === "tool_result") run.steps = event.step;
@@ -477,8 +909,19 @@ function applyEvent(run, event) {
     }
     refreshSummaries();
   }
-  updateComposer();
-  scheduleRender();
+  if (event.type === "model_delta") {
+    wakeStreamRenderer();
+    // A new section must appear even before its initial display buffer drains.
+    if (
+      newPart ||
+      (event.parts || []).some((part) => Object.hasOwn(part, "complete"))
+    )
+      scheduleRender();
+  } else {
+    updateComposer();
+    scheduleRender();
+    wakeStreamRenderer();
+  }
 }
 async function connectStream(runId, attempt = 0) {
   if (S.stream) S.stream.abort();
@@ -541,8 +984,11 @@ async function refreshSummaries() {
   try {
     const data = await api("/api/session");
     if (data.session_token !== S.token) return;
-    S.conversations = data.conversations;
+    S.conversations = data.conversations.filter(
+      (c) => !S.deletedConversations.has(c.id),
+    );
     for (const snapshot of data.runs) {
+      if (S.deletedConversations.has(snapshot.conversation_id)) continue;
       const existing = S.runs.get(snapshot.id);
       if (!existing) S.runs.set(snapshot.id, snapshot);
       // In-flight events are authoritative; never overwrite a pending reply with an old snapshot.
@@ -554,12 +1000,19 @@ async function refreshSummaries() {
   }
 }
 async function openConversation(id) {
+  const sequence = ++S.conversationLoadSequence;
   try {
     const conversation = await api(
       `/api/conversations/${encodeURIComponent(id)}`,
     );
+    if (
+      sequence !== S.conversationLoadSequence ||
+      S.deletedConversations.has(id)
+    )
+      return;
     S.conversation = conversation;
     for (const run of conversation.runs) S.runs.set(run.id, run);
+    for (const run of conversation.runs) modelsFor(run);
     S.currentRun = conversation.runs.at(-1)?.id || null;
     stored("needle-conversation", id);
     showView("playground");
@@ -573,12 +1026,76 @@ async function openConversation(id) {
     toast(error.message, true);
   }
 }
+function requestDeleteConversation(id) {
+  const chat = S.conversations.find((item) => item.id === id);
+  if (!chat) return;
+  if (
+    [...S.runs.values()].some((run) => run.conversation_id === id && !run.done)
+  ) {
+    toast(
+      "Stop the run and wait for it to finish before deleting this conversation.",
+    );
+    return;
+  }
+  S.deleteTarget = id;
+  $("#delete-chat-title").textContent = chat.title;
+  $("#delete-error").classList.add("hidden");
+  $("#delete-dialog").showModal();
+}
+async function deleteConversation() {
+  const id = S.deleteTarget;
+  if (!id) return;
+  const button = $("#confirm-delete");
+  button.disabled = true;
+  try {
+    await api(`/api/conversations/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    S.deletedConversations.add(id);
+    S.conversations = S.conversations.filter((chat) => chat.id !== id);
+    for (const [runId, run] of S.runs) {
+      if (run.conversation_id !== id) continue;
+      if (S.streamRun === runId) {
+        S.stream?.abort();
+        S.stream = null;
+        S.streamRun = null;
+      }
+      S.runs.delete(runId);
+    }
+    if (S.conversation?.id === id) {
+      S.conversationLoadSequence++;
+      S.conversation = null;
+      S.currentRun = null;
+      stored("needle-conversation", null);
+      $("#message-input").value = "";
+      resizeInput();
+      const busy = activeRun();
+      if (busy) await openConversation(busy.conversation_id);
+      else selectInspector("setup");
+    }
+    S.deleteTarget = null;
+    $("#delete-dialog").close();
+    renderSidebar();
+    renderConversation();
+    renderActivity();
+    if (S.view === "history") renderHistory();
+    toast(
+      "Conversation and run history deleted. Workspace files are unchanged.",
+    );
+  } catch (error) {
+    $("#delete-error").textContent = error.message;
+    $("#delete-error").classList.remove("hidden");
+  } finally {
+    button.disabled = false;
+  }
+}
 function startNew() {
   if (activeRun()) {
     toast("Finish or stop the active run before starting a new conversation.");
     return;
   }
   if (S.stream) S.stream.abort();
+  S.conversationLoadSequence++;
   S.conversation = null;
   S.currentRun = null;
   stored("needle-conversation", null);
@@ -841,9 +1358,15 @@ function showSettings() {
   $("#read-only").checked = s.read_only;
   $("#create-parents").checked = s.allow_create_parent_dirs;
   $("#read-only").disabled = Boolean(S.readOnlyEnforced);
+  $$("[data-setting]").forEach((input) => {
+    const value = s[input.dataset.setting];
+    if (input.type === "checkbox") input.checked = Boolean(value);
+    else input.value = value ?? "";
+  });
+  $("#settings-workspace").textContent = S.workspace?.path || ".";
   $("#connection-result").classList.add("hidden");
   updateModeExplanation();
-  $("#settings-dialog").showModal();
+  if (!$("#settings-dialog").open) $("#settings-dialog").showModal();
 }
 function updateModeExplanation() {
   const demo = $('input[name="mode"]:checked').value === "demo";
@@ -855,7 +1378,8 @@ function updateModeExplanation() {
     : "Your reasoning model emits natural-language intents. Needle 2 translates them into tool calls. The runtime validates and gates every action. Live mode never silently falls back to the demo.";
 }
 function settingsFromForm() {
-  return {
+  const settings = {
+    ...S.settings,
     mode: $('input[name="mode"]:checked').value,
     base_url: $("#base-url").value.trim(),
     model: $("#model-name").value.trim(),
@@ -865,6 +1389,16 @@ function settingsFromForm() {
     read_only: $("#read-only").checked,
     allow_create_parent_dirs: $("#create-parents").checked,
   };
+  $$("[data-setting]").forEach((input) => {
+    settings[input.dataset.setting] =
+      input.type === "checkbox"
+        ? input.checked
+        : input.type === "number"
+          ? Number(input.value)
+          : input.value;
+  });
+  if (!settings.default_timezone) settings.default_timezone = null;
+  return settings;
 }
 async function saveSettings(event) {
   event.preventDefault();
@@ -917,6 +1451,67 @@ async function testConnection() {
     button.innerHTML = icon("refresh", true) + "Test connection";
   }
 }
+function downloadText(filename, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+async function exportSettings() {
+  try {
+    const data = await api("/api/settings/export");
+    downloadText(data.filename, data.content, "application/toml");
+    toast("Saved settings exported without API keys or machine-only paths.");
+  } catch (error) {
+    showConnectionResult(error.message, false);
+  }
+}
+async function importSettings(file) {
+  if (!file) return;
+  try {
+    if (file.size > 250000) throw new Error("Keep config files under 250 KB.");
+    const data = await api("/api/settings/import", {
+      method: "POST",
+      body: {
+        content: await file.text(),
+        format: file.name.toLowerCase().endsWith(".json") ? "json" : "toml",
+      },
+    });
+    S.settings = data.settings;
+    renderSettings();
+    showSettings();
+    showConnectionResult(
+      "Configuration imported and applied." +
+        (data.ignored.length
+          ? ` Server-only settings left unchanged: ${data.ignored.join(", ")}.`
+          : ""),
+      true,
+    );
+  } catch (error) {
+    showConnectionResult(error.message, false);
+  } finally {
+    $("#config-file").value = "";
+  }
+}
+async function resetPrompts() {
+  try {
+    const data = await api("/api/settings/defaults");
+    for (const name of [
+      "reasoning_prompt",
+      "translator_prompt",
+      "confirmation_prompt",
+    ])
+      $(`[data-setting="${name}"]`).value = data.settings[name];
+    showConnectionResult(
+      "Server instructions restored in the form. Save settings to apply.",
+      true,
+    );
+  } catch (error) {
+    showConnectionResult(error.message, false);
+  }
+}
 function showGuide() {
   $("#detail-title").textContent = "A small guide to Needle";
   $("#detail-content").innerHTML =
@@ -956,6 +1551,20 @@ $("#message-input").addEventListener("keydown", (event) => {
   }
 });
 $("#new-session").addEventListener("click", startNew);
+$("#theme-toggle").addEventListener("click", () =>
+  applyTheme(
+    document.documentElement.dataset.theme === "dark" ? "light" : "dark",
+  ),
+);
+$("#confirm-delete").addEventListener("click", deleteConversation);
+$("#export-settings").addEventListener("click", exportSettings);
+$("#import-settings").addEventListener("click", () =>
+  $("#config-file").click(),
+);
+$("#config-file").addEventListener("change", (event) =>
+  importSettings(event.target.files[0]),
+);
+$("#reset-prompts").addEventListener("click", resetPrompts);
 $("#stop-run").addEventListener("click", stopRun);
 $("#menu-button").addEventListener("click", () =>
   $("#sidebar").classList.toggle("open"),
@@ -1006,10 +1615,29 @@ document.addEventListener("click", async (event) => {
   const target = event.target.closest("button");
   if (!target) return;
   try {
+    if (
+      target.classList.contains("model-resize") ||
+      target.classList.contains("model-inspect")
+    ) {
+      const run = S.runs.get(target.dataset.modelRun);
+      const model = run && modelsFor(run).get(target.dataset.modelId);
+      if (model) {
+        if (target.classList.contains("model-resize")) {
+          model.expanded = !model.expanded;
+          const scroller = target
+            .closest(".model-card")
+            .querySelector(".model-scroll");
+          scroller.style.height = "";
+        } else model.inspect = !model.inspect;
+        renderConversation();
+      }
+    }
     if (target.dataset.view) showView(target.dataset.view);
     if (target.dataset.prompt) await sendMessage(target.dataset.prompt);
     if (target.dataset.conversation)
       await openConversation(target.dataset.conversation);
+    if (target.dataset.deleteConversation)
+      requestDeleteConversation(target.dataset.deleteConversation);
     if (target.dataset.tool) showTool(target.dataset.tool);
     if (target.dataset.directory) await loadFiles(target.dataset.directory);
     if (target.dataset.filePath)
@@ -1093,4 +1721,5 @@ async function boot() {
     toast(`${error.message} Reload this page to reconnect.`, true);
   }
 }
+applyTheme(document.documentElement.dataset.theme || "light", false);
 boot();

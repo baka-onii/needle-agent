@@ -10,7 +10,9 @@
     />
     <title>Needle · Agent workspace</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme.js"></script>
     <link rel="stylesheet" href="/style.css" />
+    <script src="/stream.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
   <body>
@@ -134,6 +136,18 @@
         <symbol id="i-stop" viewBox="0 0 24 24">
           <rect x="6" y="6" width="12" height="12" rx="2" />
         </symbol>
+        <symbol id="i-trash" viewBox="0 0 24 24">
+          <path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" />
+        </symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4" />
+          <path
+            d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"
+          />
+        </symbol>
+        <symbol id="i-moon" viewBox="0 0 24 24">
+          <path d="M20.5 14.4A9 9 0 0 1 9.6 3.5 9 9 0 1 0 20.5 14.4Z" />
+        </symbol>
         <symbol id="i-code" viewBox="0 0 24 24">
           <path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-15-2 18" />
         </symbol>
@@ -225,6 +239,14 @@
             ><strong id="breadcrumb-page">Playground</strong>
           </div>
           <div class="topbar-actions">
+            <button
+              class="icon-button theme-toggle"
+              id="theme-toggle"
+              aria-label="Switch to dark mode"
+              title="Switch to dark mode"
+            >
+              <svg class="icon"><use href="#i-moon" /></svg>
+            </button>
             <button class="text-button" id="open-guide">
               <svg class="icon"><use href="#i-book" /></svg
               ><span>Quick guide</span></button
@@ -327,7 +349,7 @@
                       ><svg class="icon"><use href="#i-file" /></svg></span
                     ><span
                       ><strong>Put it into words</strong
-                      ><small>Create a note, with your approval</small></span
+                      ><small>Create a note, no approval needed</small></span
                     ><svg class="icon starter-arrow">
                       <use href="#i-arrow" />
                     </svg>
@@ -504,8 +526,8 @@
                     <dd id="step-limit">20 steps</dd>
                   </div>
                   <div>
-                    <dt>Write approval</dt>
-                    <dd class="policy-required" id="write-policy">Required</dd>
+                    <dt>Severe-action approval</dt>
+                    <dd class="policy-required" id="write-policy">Delete, execute, edit, commit</dd>
                   </div>
                 </dl>
               </div>
@@ -620,14 +642,14 @@
                   id="max-steps"
                   type="number"
                   min="1"
-                  max="50"
+                  max="100"
                   required /></label
               ><label
                 >Read-only gate<input
                   class="text-input"
                   id="read-threshold"
                   type="number"
-                  min="0.05"
+                  min="0"
                   max="1"
                   step="0.01"
                   required /></label
@@ -636,9 +658,52 @@
                   class="text-input"
                   id="write-threshold"
                   type="number"
-                  min="0.05"
+                  min="0"
                   max="1"
                   step="0.01"
+                  required
+              /></label>
+            </div>
+            <div class="limits-grid extra-limits">
+              <label
+                >Max stalled turns<input
+                  class="text-input"
+                  id="max-stalls"
+                  data-setting="max_stalls"
+                  type="number"
+                  min="1"
+                  max="20"
+                  step="1"
+                  required /></label
+              ><label
+                >Identical failed calls<input
+                  class="text-input"
+                  id="max-repeated-failures"
+                  data-setting="max_repeated_failures"
+                  type="number"
+                  min="1"
+                  max="10"
+                  step="1"
+                  required /></label
+              ><label
+                >Context characters<input
+                  class="text-input"
+                  id="max-context-chars"
+                  data-setting="max_context_chars"
+                  type="number"
+                  min="8000"
+                  max="262144"
+                  step="1"
+                  required /></label
+              ><label
+                >Tool output characters<input
+                  class="text-input"
+                  id="max-tool-output-chars"
+                  data-setting="max_tool_output_chars"
+                  type="number"
+                  min="128"
+                  max="100000"
+                  step="1"
                   required
               /></label>
             </div>
@@ -654,10 +719,333 @@
               ></label
             >
             <p class="field-help">
-              File writes always need your approval in this console. Confidence
+              Severe actions (delete, code execution, text edits, commits)
+              need your approval in this console. Confidence
               alone is never permission.
             </p>
           </details>
+          <details class="settings-section model-settings">
+            <summary>Model output & timing</summary>
+            <p class="field-help">
+              Long file payloads need room in both models. These limits affect
+              live inference, not demo planning.
+            </p>
+            <div class="limits-grid extra-limits">
+              <label
+                >Reasoning output tokens<input
+                  class="text-input"
+                  id="llm-max-tokens"
+                  data-setting="llm_max_tokens"
+                  type="number"
+                  min="64"
+                  max="32768"
+                  step="1"
+                  required /></label
+              ><label
+                >Needle output tokens<input
+                  class="text-input"
+                  id="needle-max-tokens"
+                  data-setting="needle_max_tokens"
+                  type="number"
+                  min="64"
+                  max="32768"
+                  step="1"
+                  required /></label
+              ><label
+                >Temperature<input
+                  class="text-input"
+                  id="llm-temperature"
+                  data-setting="llm_temperature"
+                  type="number"
+                  min="0"
+                  max="2"
+                  step="0.05"
+                  required /></label
+              ><label
+                >Model timeout (seconds)<input
+                  class="text-input"
+                  id="llm-timeout-s"
+                  data-setting="llm_timeout_s"
+                  type="number"
+                  min="1"
+                  max="600"
+                  step="1"
+                  required
+              /></label>
+            </div>
+          </details>
+          <details class="settings-section resource-settings">
+            <summary>Workspace context & tool limits</summary>
+            <p class="field-help">
+              Paths are always relative to
+              <strong id="settings-workspace"></strong>. Change the server
+              workspace with --workspace or your config file.
+            </p>
+            <label class="check-option"
+              ><input
+                type="checkbox"
+                id="include-workspace-listing"
+                data-setting="include_workspace_listing"
+              /><span
+                ><strong>Include a root directory snapshot</strong
+                ><small
+                  >Ground the models in actual workspace paths at the start of
+                  each run.</small
+                ></span
+              ></label
+            >
+            <div class="limits-grid extra-limits">
+              <label
+                >Directory entry limit<input
+                  class="text-input"
+                  id="max-directory-entries"
+                  data-setting="max_directory_entries"
+                  type="number"
+                  min="1"
+                  max="2000"
+                  step="1"
+                  required /></label
+              ><label
+                >Root snapshot characters<input
+                  class="text-input"
+                  id="workspace-listing-chars"
+                  data-setting="workspace_listing_chars"
+                  type="number"
+                  min="128"
+                  max="10000"
+                  step="1"
+                  required /></label
+              ><label
+                >Search results<input
+                  class="text-input"
+                  id="max-search-results"
+                  data-setting="max_search_results"
+                  type="number"
+                  min="1"
+                  max="500"
+                  step="1"
+                  required /></label
+              ><label
+                >Matches per file<input
+                  class="text-input"
+                  id="max-matches-per-file"
+                  data-setting="max_matches_per_file"
+                  type="number"
+                  min="1"
+                  max="100"
+                  step="1"
+                  required /></label
+              ><label
+                >Search context lines<input
+                  class="text-input"
+                  id="search-context-lines"
+                  data-setting="search_context_lines"
+                  type="number"
+                  min="0"
+                  max="20"
+                  step="1"
+                  required /></label
+              ><label
+                >Search file size (bytes)<input
+                  class="text-input"
+                  id="max-search-file-bytes"
+                  data-setting="max_search_file_bytes"
+                  type="number"
+                  min="1"
+                  max="10000000"
+                  step="1"
+                  required /></label
+              ><label
+                >Search entry limit<input
+                  class="text-input"
+                  id="max-search-entries"
+                  data-setting="max_search_entries"
+                  type="number"
+                  min="1"
+                  max="1000000"
+                  step="1"
+                  required /></label
+              ><label
+                >Write content characters<input
+                  class="text-input"
+                  id="max-write-chars"
+                  data-setting="max_write_chars"
+                  type="number"
+                  min="1"
+                  max="100000"
+                  step="1"
+                  required
+              /></label>
+            </div>
+            <label class="field-label" for="default-timezone"
+              >Default timezone</label
+            >
+            <input
+              class="text-input"
+              id="default-timezone"
+              data-setting="default_timezone"
+              placeholder="System timezone, or Asia/Kolkata"
+              maxlength="100"
+            />
+          </details>
+          <details class="settings-section streaming-settings">
+            <summary>Streaming & model conversation</summary>
+            <label class="check-option"
+              ><input
+                id="llm-stream"
+                data-setting="llm_stream"
+                type="checkbox"
+              /><span
+                ><strong>Stream model responses</strong
+                ><small
+                  >Use the provider's live text stream. Disable for a
+                  non-streaming endpoint.</small
+                ></span
+              ></label
+            >
+            <label class="check-option"
+              ><input
+                id="capture-model-inputs"
+                data-setting="capture_model_inputs"
+                type="checkbox"
+              /><span
+                ><strong>Show sent model messages</strong
+                ><small
+                  >Includes workspace context and file observations in
+                  inspectable, session-local traces. API headers and keys are
+                  not included.</small
+                ></span
+              ></label
+            >
+            <div class="limits-grid extra-limits">
+              <label
+                >Display buffer (ms)<input
+                  class="text-input"
+                  id="stream-buffer-ms"
+                  data-setting="stream_buffer_ms"
+                  type="number"
+                  min="0"
+                  max="5000"
+                  step="50"
+                  required
+              /></label>
+              <label
+                >Catch-up window (ms)<input
+                  class="text-input"
+                  data-setting="stream_max_lag_ms"
+                  type="number"
+                  min="100"
+                  max="10000"
+                  step="50"
+                  required
+              /></label>
+              <label
+                >Server flush interval (ms)<input
+                  class="text-input"
+                  data-setting="stream_flush_ms"
+                  type="number"
+                  min="10"
+                  max="500"
+                  step="10"
+                  required
+              /></label>
+              <label
+                >Model output characters<input
+                  class="text-input"
+                  data-setting="max_model_output_chars"
+                  type="number"
+                  min="1024"
+                  max="500000"
+                  required
+              /></label>
+            </div>
+            <p class="field-help">
+              A short buffer smooths uneven token delivery. Text follows
+              measured output speed and catches up at the end. Set the buffer to
+              0 for immediate updates. Reduced-motion preferences skip the
+              typing animation. Tool execution and approval prompts are never
+              delayed by display pacing.
+            </p>
+          </details>
+          <details class="settings-section prompt-settings">
+            <summary>Reasoning, translation & confirmation prompts</summary>
+            <p class="field-help">
+              Applied to the next run. Actual tools and workspace metadata are
+              attached automatically. Custom text cannot disable validation,
+              confidence gates, or permissions.
+            </p>
+            <label class="field-label" for="reasoning-prompt"
+              >Reasoning instructions</label
+            >
+            <textarea
+              class="text-input prompt-editor"
+              id="reasoning-prompt"
+              data-setting="reasoning_prompt"
+              spellcheck="false"
+              rows="12"
+              maxlength="20000"
+              required
+            ></textarea>
+            <label class="field-label" for="translator-prompt"
+              >Translator instructions</label
+            >
+            <textarea
+              class="text-input prompt-editor"
+              id="translator-prompt"
+              data-setting="translator_prompt"
+              spellcheck="false"
+              rows="8"
+              maxlength="20000"
+              required
+            ></textarea>
+            <label class="field-label" for="confirmation-prompt"
+              >Tool selection review instructions</label
+            >
+            <textarea
+              class="text-input prompt-editor"
+              id="confirmation-prompt"
+              data-setting="confirmation_prompt"
+              spellcheck="false"
+              rows="8"
+              maxlength="20000"
+              required
+            ></textarea>
+            <button
+              type="button"
+              class="button secondary small"
+              id="reset-prompts"
+            >
+              Restore server instructions
+            </button>
+          </details>
+          <div class="config-file-actions">
+            <button
+              type="button"
+              class="button secondary small"
+              id="import-settings"
+            >
+              Import config
+            </button>
+            <button
+              type="button"
+              class="button secondary small"
+              id="export-settings"
+            >
+              Export saved settings
+            </button>
+            <input
+              type="file"
+              id="config-file"
+              class="hidden"
+              accept=".toml,.json"
+            />
+          </div>
+          <p class="field-help">
+            Settings are session-local. Export a portable TOML file to keep
+            them, then use <code>needle-agent serve --config needle.toml</code>.
+            Imports apply immediately and must embed prompt text; server paths
+            and weights are not changed. Keys are never exported.
+          </p>
           <div
             class="connection-result hidden"
             id="connection-result"
@@ -686,6 +1074,28 @@
         </button>
       </div>
       <div id="detail-content"></div>
+    </dialog>
+    <dialog
+      class="delete-dialog"
+      id="delete-dialog"
+      aria-labelledby="delete-title"
+      aria-describedby="delete-description"
+    >
+      <div class="detail-heading">
+        <h2 id="delete-title">Delete conversation?</h2>
+      </div>
+      <p id="delete-description">
+        This removes the conversation and its run history from this browser
+        session. Workspace files are not deleted. This cannot be undone.
+      </p>
+      <p class="delete-chat-title" id="delete-chat-title"></p>
+      <p class="delete-error hidden" id="delete-error" role="alert"></p>
+      <div class="pending-actions">
+        <button class="button secondary dialog-close" autofocus>Cancel</button>
+        <button class="button danger" id="confirm-delete">
+          Delete conversation
+        </button>
+      </div>
     </dialog>
     <div class="toast-region" id="toasts" aria-live="polite"></div>
   </body>

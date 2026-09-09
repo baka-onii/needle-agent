@@ -10,9 +10,13 @@ Use live mode for open-ended reasoning and calibrated Needle confidence.
 from __future__ import annotations
 
 import re
+import time
+from collections.abc import Iterator
 from typing import Any
 
 from agent_runtime.models.action import NeedleResult, ToolRanking
+from agent_runtime.models.streaming import ModelDelta, check_cancelled
+from agent_runtime.protocol.intent import explicit_path, literal_write_content, write_action
 from agent_runtime.tools.base import Tool
 
 _FILE = re.compile(r"[\w./-]+\.[A-Za-z0-9_-]+")
@@ -29,6 +33,26 @@ def _output(message: dict) -> str:
 
 class DemoReasoningModel:
     """Ground answers in actual observations; never claim arbitrary AI capability."""
+
+    model_name = "Demo planner"
+
+    def stream(self, messages, *, cancelled=None) -> Iterator[ModelDelta]:
+        """Explicitly simulated delivery for exercising the real streaming UI."""
+        output = self.generate(messages)
+        summary = (
+            "Demo plan (simulated): send one concrete action to the translator, "
+            "then inspect its result."
+            if "<tool>" in output[:20]
+            else "Demo plan (simulated): use the observed results to return the response."
+        )
+        yield ModelDelta(kind="metadata", streamed=True)
+        for channel, text in (("reasoning", summary), ("content", output)):
+            for start in range(0, len(text), 48):
+                check_cancelled(cancelled)
+                time.sleep(0.025)
+                check_cancelled(cancelled)
+                yield ModelDelta(text[start : start + 48], kind=channel)
+        yield ModelDelta(kind="metadata", finish_reason="stop")
 
     def generate(self, messages: list[dict[str, Any]]) -> str:
         user_index = max(
@@ -63,7 +87,7 @@ class DemoReasoningModel:
             if content is not None:
                 plans.extend(
                     [
-                        f"Write the file {filename} with this exact text:\n{content}",
+                        write_action(filename, content),
                         f"Read the file {filename}.",
                     ]
                 )
@@ -176,6 +200,12 @@ class DemoActionModel:
     """Deterministic NL translator; its 1.0 scores are synthetic, not calibrated."""
 
     def translate(self, action: str, tools: list[Tool]) -> NeedleResult:
+        if action.startswith("Use write_file to "):
+            return NeedleResult(
+                selected_tool="write_file",
+                arguments={"path": explicit_path(action), "content": literal_write_content(action)},
+                confidence=1.0,
+            )
         patterns = [
             (r"Read the directory (.*)\.", "read_directory", ("path",)),
             (r"Read the file (.*)\.", "read_file", ("path",)),

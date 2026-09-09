@@ -24,15 +24,41 @@ def registry(workspace: Path) -> ToolRegistry:
     return create_default_registry(AgentConfig(workspace_root=str(workspace)))
 
 
-def test_default_registry_has_seven_tools(registry: ToolRegistry) -> None:
+def test_default_registry_has_all_required_tools(registry: ToolRegistry) -> None:
     names = sorted(t.name for t in registry.list())
     assert names == [
+        "apply_patch",
         "ask_user",
         "calculator",
+        "copy_file",
+        "create_directory",
+        "delete_file",
+        "delete_text",
+        "file_info",
+        "find_executable",
         "get_time",
+        "get_working_directory",
+        "git_branch_list",
+        "git_checkout",
+        "git_commit",
+        "git_diff",
+        "git_log",
+        "git_show",
+        "git_stage",
+        "git_status",
+        "insert_text",
+        "move_file",
+        "process_info",
         "read_directory",
         "read_file",
+        "replace_text",
+        "run_powershell",
+        "run_process",
+        "run_python",
         "search_files",
+        "web_extract",
+        "web_open",
+        "web_search",
         "write_file",
     ]
 

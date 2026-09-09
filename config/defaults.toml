@@ -1,0 +1,74 @@
+# Canonical defaults. Copy with `needle-agent config init needle.toml`.
+# Paths in a user config are relative to that config file, not the shell's cwd.
+[runtime]
+confidence_threshold = 0.85
+read_only_threshold = 0.5
+max_tool_steps = 20
+max_stalls = 3
+max_repeated_failures = 2
+max_tool_output_chars = 20000
+max_context_chars = 32000
+
+[workspace]
+workspace_root = "."
+allow_create_parent_dirs = false
+read_only = false
+include_workspace_listing = true
+max_directory_entries = 200
+workspace_listing_chars = 3000
+
+[tools]
+max_search_results = 50
+max_matches_per_file = 5
+search_context_lines = 2
+max_search_file_bytes = 2000000
+max_search_entries = 20000
+max_write_chars = 100000
+default_timezone = ""
+
+[models]
+llm_stream = true
+mode = "live"
+action_model = "needle"
+llm_base_url = "http://127.0.0.1:8080"
+llm_model = "ornith"
+llm_timeout_s = 120.0
+llm_max_tokens = 4096
+llm_temperature = 0.2
+fg_base_url = "http://127.0.0.1:8081"
+fg_timeout_s = 120.0
+fg_max_tokens = 256
+fg_temperature = 0.0
+# Validated single-turn budget: larger values make the Needle engine babble
+# into input-independent calls and risk native crashes. Keep small.
+needle_max_tokens = 256
+
+[safety]
+# Mutating tools that pause for human approval via approve_fn. Everything else
+# (reads, write_file, move/copy/create, stage, ask_user) runs without asking.
+require_approval_for = [
+    "delete_file",
+    "run_python",
+    "run_process",
+    "run_powershell",
+    "git_commit",
+    "git_checkout",
+    "replace_text",
+    "insert_text",
+    "delete_text",
+    "apply_patch",
+]
+# API keys belong in NEEDLE_LLM_API_KEY, not in this file.
+# Custom weights may be set using NEEDLE_WEIGHTS or --set needle_weights=PATH.
+
+[streaming]
+stream_buffer_ms = 1000
+stream_max_lag_ms = 1800
+stream_flush_ms = 50
+max_model_output_chars = 128000
+capture_model_inputs = true
+
+[prompts]
+reasoning_prompt_file = "prompts/reasoning.md"
+translator_prompt_file = "prompts/translator.md"
+confirmation_prompt_file = "prompts/confirmation.md"

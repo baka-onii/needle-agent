@@ -105,7 +105,7 @@ def test_real_tools_stream_and_history(web):
     assert bootstrap["api_key_configured"] is True
 
 
-def test_questions_then_write_approval_pause_and_resume(web):
+def test_questions_then_write_completes_without_approval(web):
     service, base, root = web
     token, conversation = setup_conversation(base)
     run = start(base, token, conversation, "Create a note")
@@ -120,45 +120,10 @@ def test_questions_then_write_approval_pause_and_resume(web):
         data={"question_id": question["question_id"], "answer": "Hello from the browser"},
     )
     assert status == 200
-    real_run = service.sessions[token].runs[run["id"]]
-    with real_run.condition:
-        assert real_run.condition.wait_for(
-            lambda: real_run.pending is not None and real_run.pending["kind"] == "approval",
-            timeout=5,
-        )
-        approval = dict(real_run.pending)
-    assert not (root / "note.txt").exists()
-    assert approval["call"]["arguments"]["content"] == "Hello from the browser"
-    status, _ = request(
-        base,
-        f"/api/runs/{run['id']}/answer",
-        method="POST",
-        token=token,
-        data={"question_id": approval["question_id"], "approved": True},
-    )
-    assert status == 200
     events = finish(base, token, run["id"])
     assert events[-1]["status"] == "COMPLETED"
     assert events[-1]["steps"] == 3
     assert (root / "note.txt").read_text() == "Hello from the browser"
-
-
-def test_deny_write_never_mutates_file(web):
-    service, base, root = web
-    token, conversation = setup_conversation(base)
-    run = start(base, token, conversation, 'Write "hello" to note.txt')
-    approval = wait_pending(service, token, run["id"])
-    status, _ = request(
-        base,
-        f"/api/runs/{run['id']}/answer",
-        method="POST",
-        token=token,
-        data={"question_id": approval["question_id"], "approved": False},
-    )
-    assert status == 200
-    events = finish(base, token, run["id"])
-    assert events[-1]["steps"] == 0
-    assert not (root / "note.txt").exists()
 
 
 def test_cancel_wakes_question_and_prevents_new_tools(web):
@@ -260,7 +225,7 @@ def test_settings_busy_run_and_stale_answers(web):
 
 def test_static_assets_preview_headers_and_no_cors(web):
     _, base, _ = web
-    for path in ("/", "/app.js", "/style.css", "/favicon.svg"):
+    for path in ("/", "/app.js", "/style.css", "/favicon.svg", "/theme.js"):
         req = urllib.request.Request(base + path, headers={"Host": "3000-preview.e2b.app"})
         with urllib.request.urlopen(req, timeout=5) as response:
             assert response.status == 200
@@ -298,3 +263,243 @@ def test_browser_cannot_redirect_server_owned_api_key(web):
     assert status == 403
     assert "API key is bound" in body["error"]
     assert "never-leak" not in str(body)
+
+
+def test_editable_prompts_model_limits_and_portable_config(web):
+    service, base, root = web
+    token, _ = setup_conversation(base)
+    _, original = request(base, "/api/session", token=token)
+    settings = {
+        **original["settings"],
+        "reasoning_prompt": "REASON CUSTOM",
+        "translator_prompt": "TRANSLATE CUSTOM",
+        "confirmation_prompt": "REVIEW CUSTOM",
+        "llm_max_tokens": 5000,
+        "needle_max_tokens": 3000,
+        "max_stalls": 5,
+        "max_search_results": 8,
+    }
+    status, result = request(base, "/api/settings", method="POST", token=token, data=settings)
+    assert status == 200
+    config = service.run_config(service.sessions[token].settings)
+    assert (
+        config.reasoning_prompt == "REASON CUSTOM"
+        and config.translator_prompt == "TRANSLATE CUSTOM"
+    )
+    assert config.confirmation_prompt == "REVIEW CUSTOM" and config.needle_max_tokens == 3000
+    assert config.max_stalls == 5 and config.max_search_results == 8
+    _, exported = request(base, "/api/settings/export", token=token)
+    assert "never-leak" not in exported["content"]
+    assert (
+        "workspace_root" not in exported["content"] and "needle_weights" not in exported["content"]
+    )
+    assert "REASON CUSTOM" in exported["content"] and "REVIEW CUSTOM" in exported["content"]
+    _, other = request(base, "/api/session")
+    assert (
+        request(
+            base,
+            "/api/settings",
+            method="POST",
+            token=other["session_token"],
+            data={**other["settings"], "default_timezone": "UTC"},
+        )[0]
+        == 200
+    )
+    status, imported = request(
+        base,
+        "/api/settings/import",
+        method="POST",
+        token=other["session_token"],
+        data={"content": exported["content"], "format": "toml"},
+    )
+    assert status == 200 and imported["settings"] == result["settings"]
+    assert service.config.workspace_root == str(root)
+    assert other["settings"]["reasoning_prompt"] != "REASON CUSTOM"
+
+
+def test_import_cannot_load_server_prompt_files_or_change_workspace(web):
+    service, base, root = web
+    token, _ = setup_conversation(base)
+    content = '[prompts]\nreasoning_prompt_file = "/etc/passwd"\n'
+    status, error = request(
+        base,
+        "/api/settings/import",
+        method="POST",
+        token=token,
+        data={"content": content},
+    )
+    assert status == 400 and "embed prompts" in error["error"]
+    content = '[workspace]\nworkspace_root = "/etc"\n[models]\nneedle_weights = "/secret"\n'
+    status, result = request(
+        base,
+        "/api/settings/import",
+        method="POST",
+        token=token,
+        data={"content": content},
+    )
+    assert status == 200 and result["ignored"] == ["needle_weights", "workspace_root"]
+    assert service.config.workspace_root == str(root) and service.config.needle_weights is None
+
+
+def test_invalid_config_import_is_atomic_and_prompts_are_bounded(web):
+    service, base, _ = web
+    token, _ = setup_conversation(base)
+    before = service.sessions[token].settings.model_dump()
+    for content in (
+        "[runtime]\nmax_stalls = 0",
+        '[prompts]\nreasoning_prompt = ""',
+        "[models]\nllm_temperature = 6",
+        "[runtime]\nmax_stallz = 5",
+        "[runtime]\nmax_stalls = 9\n[models]\nllm_temperature = 6",
+    ):
+        status, _ = request(
+            base,
+            "/api/settings/import",
+            method="POST",
+            token=token,
+            data={"content": content},
+        )
+        assert status == 400
+        assert service.sessions[token].settings.model_dump() == before
+    settings = {**before, "reasoning_prompt": "x" * 20001}
+    assert request(base, "/api/settings", method="POST", token=token, data=settings)[0] == 400
+    settings = {**before, "max_context_chars": 8000, "reasoning_prompt": "x" * 10000}
+    assert request(base, "/api/settings", method="POST", token=token, data=settings)[0] == 400
+
+
+def test_config_import_respects_read_only_floor_and_api_key_origin(web):
+    from dataclasses import replace
+
+    service, base, _ = web
+    token, _ = setup_conversation(base)
+    service.config = replace(service.config, read_only=True)
+    for content in (
+        "[workspace]\nread_only = false",
+        '[workspace]\nread_only = true\n[models]\nmode = "live"\nllm_base_url = "https://other.invalid"',
+    ):
+        status, _ = request(
+            base,
+            "/api/settings/import",
+            method="POST",
+            token=token,
+            data={"content": content},
+        )
+        assert status == 403
+
+
+def test_delete_chat_removes_history_and_runs_not_workspace_files(web):
+    service, base, root = web
+    token, conversation = setup_conversation(base)
+    run = start(base, token, conversation, 'Write "keep this file" to kept.txt')
+    finish(base, token, run["id"])
+    status, deleted = request(
+        base, f"/api/conversations/{conversation}", method="DELETE", token=token
+    )
+    assert status == 200 and deleted["deleted"] == conversation
+    assert (root / "kept.txt").read_text() == "keep this file"
+    assert request(base, f"/api/conversations/{conversation}", token=token)[0] == 404
+    assert request(base, f"/api/runs/{run['id']}", token=token)[0] == 404
+    assert request(base, f"/api/runs/{run['id']}/events", token=token)[0] == 404
+    _, snapshot = request(base, "/api/session", token=token)
+    assert snapshot["conversations"] == [] and snapshot["runs"] == []
+    assert (
+        request(base, f"/api/conversations/{conversation}", method="DELETE", token=token)[0] == 404
+    )
+
+
+def test_delete_active_chat_is_rejected_until_stopped(web):
+    service, base, _ = web
+    token, conversation = setup_conversation(base)
+    run = start(base, token, conversation, "Create a note")
+    wait_pending(service, token, run["id"])
+    path = f"/api/conversations/{conversation}"
+    assert request(base, path, method="DELETE", token=token)[0] == 409
+    assert request(base, path, token=token)[0] == 200
+    request(base, f"/api/runs/{run['id']}/cancel", method="POST", token=token, data={})
+    finish(base, token, run["id"])
+    assert request(base, path, method="DELETE", token=token)[0] == 200
+
+
+def test_delete_is_session_scoped_and_cross_site_protected(web):
+    _, base, _ = web
+    token, conversation = setup_conversation(base)
+    _, other = request(base, "/api/session")
+    path = f"/api/conversations/{conversation}"
+    assert request(base, path, method="DELETE")[0] == 401
+    assert request(base, path, method="DELETE", token=other["session_token"])[0] == 404
+    assert (
+        request(base, path, method="DELETE", token=token, headers={"Sec-Fetch-Site": "cross-site"})[
+            0
+        ]
+        == 403
+    )
+    assert request(base, path, token=token)[0] == 200
+
+
+def test_eviction_does_not_leave_orphaned_run_history(web, monkeypatch):
+    _, base, _ = web
+    token, conversation = setup_conversation(base)
+    run = start(base, token, conversation, "Calculate 2+2")
+    finish(base, token, run["id"])
+    monkeypatch.setattr("agent_runtime.server.MAX_CONVERSATIONS", 1)
+    status, new = request(base, "/api/conversations", method="POST", token=token, data={})
+    assert status == 201 and new["id"] != conversation
+    assert request(base, f"/api/runs/{run['id']}", token=token)[0] == 404
+
+
+def test_streaming_settings_roundtrip_and_can_disable_input_capture(web):
+    service, base, _ = web
+    token, conversation = setup_conversation(base)
+    _, bootstrap = request(base, "/api/session", token=token)
+    settings = {
+        **bootstrap["settings"],
+        "stream_buffer_ms": 0,
+        "stream_flush_ms": 20,
+        "llm_stream": False,
+        "capture_model_inputs": False,
+    }
+    assert request(base, "/api/settings", method="POST", token=token, data=settings)[0] == 200
+    run = start(base, token, conversation, "Calculate 6*7")
+    events = finish(base, token, run["id"])
+    starts = [event for event in events if event["type"] == "model_start"]
+    assert starts and all(event["input_messages"] == [] for event in starts)
+    assert all(event["streamed"] is False for event in starts)
+    assert service.sessions[token].settings.stream_buffer_ms == 0
+    _, exported = request(base, "/api/settings/export", token=token)
+    assert "stream_buffer_ms = 0" in exported["content"]
+    assert "llm_stream = false" in exported["content"]
+
+
+def test_model_trace_budget_does_not_break_run_or_final_answer(web, monkeypatch):
+    service, base, _ = web
+    monkeypatch.setattr("agent_runtime.server.MAX_MODEL_TRACE_BYTES", 80)
+    token, conversation = setup_conversation(base)
+    run = start(base, token, conversation, "Calculate 6*7")
+    events = finish(base, token, run["id"])
+    assert events[-1]["status"] == "COMPLETED" and "42" in events[-1]["final_answer"]
+    assert any(event["type"] == "model_trace_limited" for event in events)
+    assert not any(event["type"] == "model_delta" for event in events)
+    assert [event["id"] for event in events] == list(range(1, len(events) + 1))
+    _, snapshot = request(base, f"/api/runs/{run['id']}", token=token)
+    assert snapshot["trace_limited"] and service.sessions[token].runs[run["id"]].done
+    # Replay resumes from the retained event cursor, even when details were capped.
+    _, replay = request(
+        base, f"/api/runs/{run['id']}/events?after={events[-2]['id']}", token=token, raw=True
+    )
+    assert replay.count('"type": "complete"') == 1
+
+
+def test_model_streams_are_session_scoped(web):
+    service, base, _ = web
+    token, conversation = setup_conversation(base)
+    run = start(base, token, conversation, "Create a note")
+    wait_pending(service, token, run["id"])
+    _, other = request(base, "/api/session")
+    assert request(base, f"/api/runs/{run['id']}/events", token=other["session_token"])[0] == 404
+    assert request(base, f"/api/runs/{run['id']}", token=other["session_token"])[0] == 404
+
+
+def test_streaming_module_is_packaged_and_served_with_preview_headers(web):
+    _, base, _ = web
+    status, text = request(base, "/stream.js", raw=True)
+    assert status == 200 and "PacedText" in text

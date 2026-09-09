@@ -24,18 +24,28 @@ from urllib.parse import parse_qs, urlsplit
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from agent_runtime import Agent, AgentConfig, ToolCall, ToolError
+from agent_runtime.config import MAX_CONFIG_BYTES, MAX_PROMPT_CHARS, export_config, parse_config
+from agent_runtime.context.manager import ContextManager
 from agent_runtime.models.demo import DemoActionModel, DemoReasoningModel
 from agent_runtime.models.needle import NeedleActionModel
-from agent_runtime.models.reasoning import OpenAICompatibleReasoningModel, api_base_url
+from agent_runtime.models.reasoning import (
+    OpenAICompatibleReasoningModel,
+    api_base_url,
+    build_system_prompt,
+    build_translator_prompt,
+)
+from agent_runtime.tools.base import approval_summary
 from agent_runtime.tools.filesystem import SKIP_DIRS, resolve_safe_path
 from agent_runtime.tools.registry import create_default_registry
 
-MAX_BODY_BYTES = 150_000
+MAX_BODY_BYTES = 512_000
 MAX_SESSIONS = 24
 MAX_CONVERSATIONS = 24
 MAX_RUNS = 60
 SESSION_TTL_SECONDS = 7_200
 HUMAN_TIMEOUT_SECONDS = 600
+MAX_MODEL_TRACE_BYTES = 4_000_000
+MAX_MODEL_TRACE_EVENTS = 16_000
 
 
 class WebError(Exception):
@@ -44,23 +54,94 @@ class WebError(Exception):
         super().__init__(message)
 
 
+_DEFAULT_CONFIG = AgentConfig()
+
+
 class Settings(BaseModel):
+    """Only browser-editable values. Defaults come from the canonical config files."""
+
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    mode: Literal["demo", "live"] = "live"
-    base_url: str = Field(default="http://127.0.0.1:8080", max_length=2_048)
-    model: str = Field(default="ornith", min_length=1, max_length=200)
-    confidence_threshold: float = Field(default=0.85, ge=0.05, le=1, allow_inf_nan=False)
-    read_only_threshold: float = Field(default=0.5, ge=0.05, le=1, allow_inf_nan=False)
-    max_tool_steps: int = Field(default=20, ge=1, le=50)
-    read_only: bool = False
-    allow_create_parent_dirs: bool = False
+    mode: Literal["demo", "live"] = _DEFAULT_CONFIG.mode
+    base_url: str = Field(default=_DEFAULT_CONFIG.llm_base_url, max_length=2048)
+    model: str = Field(default=_DEFAULT_CONFIG.llm_model, min_length=1, max_length=200)
+    confidence_threshold: float = Field(
+        default=_DEFAULT_CONFIG.confidence_threshold, ge=0, le=1, allow_inf_nan=False
+    )
+    read_only_threshold: float = Field(
+        default=_DEFAULT_CONFIG.read_only_threshold, ge=0, le=1, allow_inf_nan=False
+    )
+    max_tool_steps: int = Field(default=_DEFAULT_CONFIG.max_tool_steps, ge=1, le=100)
+    max_stalls: int = Field(default=_DEFAULT_CONFIG.max_stalls, ge=1, le=20)
+    max_repeated_failures: int = Field(default=_DEFAULT_CONFIG.max_repeated_failures, ge=1, le=10)
+    max_context_chars: int = Field(default=_DEFAULT_CONFIG.max_context_chars, ge=8000, le=262144)
+    max_tool_output_chars: int = Field(
+        default=_DEFAULT_CONFIG.max_tool_output_chars, ge=128, le=100000
+    )
+    read_only: bool = _DEFAULT_CONFIG.read_only
+    allow_create_parent_dirs: bool = _DEFAULT_CONFIG.allow_create_parent_dirs
+    include_workspace_listing: bool = _DEFAULT_CONFIG.include_workspace_listing
+    max_directory_entries: int = Field(default=_DEFAULT_CONFIG.max_directory_entries, ge=1, le=2000)
+    workspace_listing_chars: int = Field(
+        default=_DEFAULT_CONFIG.workspace_listing_chars, ge=128, le=10000
+    )
+    max_search_results: int = Field(default=_DEFAULT_CONFIG.max_search_results, ge=1, le=500)
+    max_matches_per_file: int = Field(default=_DEFAULT_CONFIG.max_matches_per_file, ge=1, le=100)
+    search_context_lines: int = Field(default=_DEFAULT_CONFIG.search_context_lines, ge=0, le=20)
+    max_search_file_bytes: int = Field(
+        default=_DEFAULT_CONFIG.max_search_file_bytes, ge=1, le=10000000
+    )
+    max_search_entries: int = Field(default=_DEFAULT_CONFIG.max_search_entries, ge=1, le=1000000)
+    max_write_chars: int = Field(default=_DEFAULT_CONFIG.max_write_chars, ge=1, le=100000)
+    default_timezone: str | None = Field(default=_DEFAULT_CONFIG.default_timezone, max_length=100)
+    llm_timeout_s: float = Field(
+        default=_DEFAULT_CONFIG.llm_timeout_s, ge=1, le=600, allow_inf_nan=False
+    )
+    llm_max_tokens: int = Field(default=_DEFAULT_CONFIG.llm_max_tokens, ge=64, le=32768)
+    llm_temperature: float = Field(
+        default=_DEFAULT_CONFIG.llm_temperature, ge=0, le=2, allow_inf_nan=False
+    )
+    needle_max_tokens: int = Field(default=_DEFAULT_CONFIG.needle_max_tokens, ge=64, le=32768)
+    reasoning_prompt: str = Field(
+        default=_DEFAULT_CONFIG.reasoning_prompt, min_length=1, max_length=MAX_PROMPT_CHARS
+    )
+    translator_prompt: str = Field(
+        default=_DEFAULT_CONFIG.translator_prompt, min_length=1, max_length=MAX_PROMPT_CHARS
+    )
+    confirmation_prompt: str = Field(
+        default=_DEFAULT_CONFIG.confirmation_prompt, min_length=1, max_length=MAX_PROMPT_CHARS
+    )
+
+    llm_stream: bool = _DEFAULT_CONFIG.llm_stream
+    stream_buffer_ms: int = Field(default=_DEFAULT_CONFIG.stream_buffer_ms, ge=0, le=5000)
+    stream_max_lag_ms: int = Field(default=_DEFAULT_CONFIG.stream_max_lag_ms, ge=100, le=10000)
+    stream_flush_ms: int = Field(default=_DEFAULT_CONFIG.stream_flush_ms, ge=10, le=500)
+    max_model_output_chars: int = Field(
+        default=_DEFAULT_CONFIG.max_model_output_chars, ge=1024, le=500000
+    )
+    capture_model_inputs: bool = _DEFAULT_CONFIG.capture_model_inputs
 
     @field_validator("base_url")
     @classmethod
     def valid_url(cls, value: str) -> str:
         api_base_url(value)
         return value.strip().rstrip("/")
+
+
+_SETTING_FIELDS = {
+    name: {"base_url": "llm_base_url", "model": "llm_model"}.get(name, name)
+    for name in Settings.model_fields
+}
+
+
+def settings_from_config(config: AgentConfig) -> Settings:
+    return Settings(**{name: getattr(config, field) for name, field in _SETTING_FIELDS.items()})
+
+
+class ConfigImport(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    content: str = Field(min_length=1, max_length=MAX_CONFIG_BYTES)
+    format: Literal["toml", "json"] = "toml"
 
 
 class Prompt(BaseModel):
@@ -97,9 +178,38 @@ class Run:
     elapsed_ms: int = 0
     cancel: threading.Event = field(default_factory=threading.Event)
     condition: threading.Condition = field(default_factory=threading.Condition)
+    model_trace_bytes: int = 0
+    model_trace_events: int = 0
+    trace_limited: bool = False
 
     def push(self, event: dict) -> None:
         with self.condition:
+            if event["type"] in {"model_start", "model_status", "model_delta", "model_end"}:
+                size = len(json.dumps(event, ensure_ascii=False).encode("utf-8"))
+                if not self.trace_limited and (
+                    self.model_trace_bytes + size > MAX_MODEL_TRACE_BYTES
+                    or self.model_trace_events >= MAX_MODEL_TRACE_EVENTS
+                ):
+                    self.trace_limited = True
+                    self.push(
+                        {
+                            "type": "model_trace_limited",
+                            "message": "Model trace limit reached. "
+                            "Further token/request details are omitted; "
+                            "tool results and the final answer are still retained.",
+                        }
+                    )
+                if self.trace_limited:
+                    if event["type"] == "model_delta":
+                        return
+                    event = {**event, "trace_limited": True}
+                    if event["type"] == "model_start":
+                        event["input_messages"] = []
+                    if event["type"] == "model_end":
+                        event["answer"] = None
+                else:
+                    self.model_trace_bytes += size
+                    self.model_trace_events += 1
             event = {**event, "id": len(self.events) + 1}
             event.setdefault("elapsed_ms", round((time.time() - self.created_at) * 1_000))
             self.events.append(event)
@@ -154,6 +264,7 @@ class Run:
                 "done": self.done,
                 "steps": self.steps,
                 "elapsed_ms": self.elapsed_ms,
+                "trace_limited": self.trace_limited,
             }
             if include_events:
                 data["events"] = list(self.events)
@@ -196,15 +307,8 @@ class WorkspaceService:
         if not root.is_dir():
             raise ValueError("Workspace must be an existing directory.")
         self.config = replace(config, workspace_root=str(root))
-        self.default_settings = Settings(
-            mode="demo" if demo else "live",
-            base_url=config.llm_base_url,
-            model=config.llm_model,
-            confidence_threshold=config.confidence_threshold,
-            read_only_threshold=config.read_only_threshold,
-            max_tool_steps=config.max_tool_steps,
-            read_only=config.read_only,
-            allow_create_parent_dirs=config.allow_create_parent_dirs,
+        self.default_settings = settings_from_config(
+            replace(self.config, mode="demo" if demo else config.mode)
         )
         self.sessions: dict[str, BrowserSession] = {}
         self.lock = threading.RLock()
@@ -241,16 +345,34 @@ class WorkspaceService:
                     "The API key is bound to the server-configured model origin. "
                     "Change NEEDLE_LLM_BASE_URL on the server to switch providers.",
                 )
-        return replace(
-            self.config,
-            llm_base_url=settings.base_url,
-            llm_model=settings.model,
-            confidence_threshold=settings.confidence_threshold,
-            read_only_threshold=settings.read_only_threshold,
-            max_tool_steps=settings.max_tool_steps,
-            read_only=self.config.read_only or settings.read_only,
-            allow_create_parent_dirs=settings.allow_create_parent_dirs,
-        )
+        values = {field: getattr(settings, name) for name, field in _SETTING_FIELDS.items()}
+        values["read_only"] = self.config.read_only or settings.read_only
+        config = replace(self.config, **values)
+        # Reject unusable prompts/budgets when saving, not at the next model call.
+        ContextManager(config, build_system_prompt(create_default_registry(config).list(), config))
+        return config
+
+    def update_settings(self, session: BrowserSession, settings: Settings) -> None:
+        with session.lock:
+            if session.busy():
+                raise WebError(409, "Stop the active run before changing settings.")
+            if self.config.read_only and not settings.read_only:
+                raise WebError(403, "The server was started in read-only mode.")
+            self.run_config(settings)
+            session.settings = settings
+
+    def import_settings(self, session: BrowserSession, document: ConfigImport) -> dict:
+        values = parse_config(document.content, format=document.format)
+        ignored = sorted(values.keys() & {"workspace_root", "needle_weights"})
+        reverse = {field: name for name, field in _SETTING_FIELDS.items()}
+        with session.lock:
+            combined = session.settings.model_dump()
+            combined.update(
+                {reverse[key]: value for key, value in values.items() if key in reverse}
+            )
+            settings = Settings.model_validate(combined)
+            self.update_settings(session, settings)
+        return {"settings": settings.model_dump(), "ignored": ignored}
 
     def _make_agent(self, settings: Settings, run: Run) -> Agent:
         models = (
@@ -265,7 +387,7 @@ class WorkspaceService:
             approve_fn=lambda call: (
                 run.wait_for_user(
                     "approval",
-                    f"Allow writing to {call.arguments['path']}?",
+                    f"Allow {approval_summary(call)}?",
                     call,
                 )
                 is True
@@ -301,13 +423,30 @@ class WorkspaceService:
         except KeyError as exc:
             raise WebError(404, "Run not found.") from exc
 
+    def delete_conversation(self, session: BrowserSession, conversation_id: str) -> None:
+        """Delete only this session's finished chat and its traces, never workspace files."""
+        with session.lock:
+            self.conversation(session, conversation_id)
+            related = [
+                run for run in session.runs.values() if run.conversation_id == conversation_id
+            ]
+            if any(not run.done for run in related):
+                raise WebError(
+                    409,
+                    "Stop the active run and wait for it to finish "
+                    "before deleting this conversation.",
+                )
+            for run in related:
+                del session.runs[run.id]
+            del session.conversations[conversation_id]
+
     def new_conversation(self, session: BrowserSession) -> Conversation:
         with session.lock:
             if len(session.conversations) >= MAX_CONVERSATIONS:
                 oldest = next(iter(session.conversations))
                 if any(r.conversation_id == oldest and not r.done for r in session.runs.values()):
                     raise WebError(409, "Finish the active conversation first.")
-                del session.conversations[oldest]
+                self.delete_conversation(session, oldest)
             conversation = Conversation(secrets.token_hex(12))
             session.conversations[conversation.id] = conversation
             return conversation
@@ -462,7 +601,10 @@ class WorkspaceService:
         except Exception as exc:
             return {"ok": False, "message": str(exc)}
         needle = NeedleActionModel(
-            create_default_registry(config).list(), weights=config.needle_weights
+            create_default_registry(config).list(),
+            weights=config.needle_weights,
+            system=build_translator_prompt(config),
+            max_new_tokens=config.needle_max_tokens,
         )
         try:
             needle.prepare()
@@ -544,6 +686,9 @@ def make_server(service: WorkspaceService, host: str = "0.0.0.0", port: int = 30
         def do_POST(self) -> None:  # noqa: N802
             self.dispatch("POST")
 
+        def do_DELETE(self) -> None:  # noqa: N802
+            self.dispatch("DELETE")
+
         def dispatch(self, method: str) -> None:
             try:
                 parsed = urlsplit(self.path)
@@ -552,7 +697,14 @@ def make_server(service: WorkspaceService, host: str = "0.0.0.0", port: int = 30
                 if method == "GET" and path == "/health":
                     self.json({"status": "ok"})
                     return
-                if method == "GET" and path in {"/", "/app.js", "/style.css", "/favicon.svg"}:
+                if method == "GET" and path in {
+                    "/",
+                    "/app.js",
+                    "/style.css",
+                    "/favicon.svg",
+                    "/theme.js",
+                    "/stream.js",
+                }:
                     name = "index.html" if path == "/" else path[1:]
                     data = files("agent_runtime").joinpath("web", name).read_bytes()
                     content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
@@ -567,7 +719,10 @@ def make_server(service: WorkspaceService, host: str = "0.0.0.0", port: int = 30
                     raise WebError(404, "Not found.")
                 # Token + JSON content type + no permissive CORS protects browser mutations.
                 session = self.browser_session()
-                if method == "POST" and self.headers.get("Sec-Fetch-Site") == "cross-site":
+                if (
+                    method in {"POST", "DELETE"}
+                    and self.headers.get("Sec-Fetch-Site") == "cross-site"
+                ):
                     raise WebError(403, "Cross-site requests are not allowed.")
                 if path == "/api/conversations" and method == "POST":
                     self.body()
@@ -575,14 +730,25 @@ def make_server(service: WorkspaceService, host: str = "0.0.0.0", port: int = 30
                     return
                 if path == "/api/settings" and method == "POST":
                     settings = Settings.model_validate(self.body())
-                    service.run_config(settings)
-                    with session.lock:
-                        if session.busy():
-                            raise WebError(409, "Stop the active run before changing settings.")
-                        if service.config.read_only and not settings.read_only:
-                            raise WebError(403, "The server was started in read-only mode.")
-                        session.settings = settings
+                    service.update_settings(session, settings)
                     self.json({"settings": settings.model_dump()})
+                    return
+                if path == "/api/settings/defaults" and method == "GET":
+                    self.json({"settings": service.default_settings.model_dump()})
+                    return
+                if path == "/api/settings/export" and method == "GET":
+                    with session.lock:
+                        config = service.run_config(session.settings)
+                        self.json(
+                            {
+                                "filename": "needle.toml",
+                                "content": export_config(config, include_server=False),
+                            }
+                        )
+                    return
+                if path == "/api/settings/import" and method == "POST":
+                    document = ConfigImport.model_validate(self.body())
+                    self.json(service.import_settings(session, document))
                     return
                 if path == "/api/connection" and method == "POST":
                     settings = Settings.model_validate(self.body())
@@ -599,6 +765,11 @@ def make_server(service: WorkspaceService, host: str = "0.0.0.0", port: int = 30
                 parts = path.strip("/").split("/")
                 if len(parts) >= 3 and parts[:2] == ["api", "conversations"]:
                     conversation = service.conversation(session, parts[2])
+                    if len(parts) == 3 and method == "DELETE":
+                        self.body()
+                        service.delete_conversation(session, conversation.id)
+                        self.json({"deleted": conversation.id})
+                        return
                     if len(parts) == 3 and method == "GET":
                         with session.lock:
                             self.json(
@@ -648,7 +819,7 @@ def make_server(service: WorkspaceService, host: str = "0.0.0.0", port: int = 30
             except ValidationError as exc:
                 error = exc.errors(include_input=False, include_url=False)[0]
                 self.json({"error": f"{'.'.join(map(str, error['loc']))}: {error['msg']}"}, 400)
-            except ToolError as exc:
+            except (ToolError, ValueError) as exc:
                 self.json({"error": str(exc)}, 400)
             except (BrokenPipeError, ConnectionResetError):
                 pass  # A disconnected viewer does not implicitly cancel its run.

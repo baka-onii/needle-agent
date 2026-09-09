@@ -12,11 +12,14 @@ from agent_runtime.config import AgentConfig
 from agent_runtime.context.manager import ContextManager
 from agent_runtime.graph.workflow import RuntimeDeps, build_workflow
 from agent_runtime.models.action import ActionModel
+from agent_runtime.models.demo import DemoActionModel, DemoReasoningModel
 from agent_runtime.models.needle import NeedleActionModel
 from agent_runtime.models.reasoning import (
     OpenAICompatibleReasoningModel,
     ReasoningModel,
+    StreamingReasoningModel,
     build_system_prompt,
+    build_translator_prompt,
 )
 from agent_runtime.state import AgentState, create_initial_state
 from agent_runtime.tools.base import ToolCall
@@ -27,7 +30,7 @@ class Agent:
     def __init__(
         self,
         config: AgentConfig | None = None,
-        reasoning: ReasoningModel | None = None,
+        reasoning: ReasoningModel | StreamingReasoningModel | None = None,
         action: ActionModel | None = None,
         registry: ToolRegistry | None = None,
         ask_fn: Callable[[str], str] | None = None,
@@ -39,7 +42,12 @@ class Agent:
             raise ValueError(f"Workspace does not exist or is not a directory: {root}")
         self.config = replace(config, workspace_root=str(root))
         self.registry = registry or create_default_registry(self.config, ask_fn)
-        self._contexts = ContextManager(self.config, build_system_prompt(self.registry.list()))
+        self._contexts = ContextManager(
+            self.config, build_system_prompt(self.registry.list(), self.config)
+        )
+        if self.config.mode == "demo":
+            reasoning = reasoning or DemoReasoningModel()
+            action = action or DemoActionModel()
         self._reasoning = reasoning or OpenAICompatibleReasoningModel(
             base_url=config.llm_base_url,
             model=config.llm_model,
@@ -49,8 +57,21 @@ class Agent:
             api_key=config.llm_api_key,
         )
         self._owns_action = action is None
+        if action is None and self.config.action_model == "functiongemma":
+            from agent_runtime.models.functiongemma import FunctionGemmaActionModel
+
+            action = FunctionGemmaActionModel(
+                self.registry.list(),
+                base_url=config.fg_base_url,
+                timeout_s=config.fg_timeout_s,
+                max_tokens=config.fg_max_tokens,
+                temperature=config.fg_temperature,
+            )
         self._action = action or NeedleActionModel(
-            self.registry.list(), weights=config.needle_weights
+            self.registry.list(),
+            weights=config.needle_weights,
+            system=build_translator_prompt(self.config),
+            max_new_tokens=config.needle_max_tokens,
         )
         self._approve = approve_fn
 
@@ -76,11 +97,17 @@ class Agent:
             ):
                 raise ValueError("History must contain user/assistant text messages only.")
             initial["messages"] = [*[dict(m) for m in history], *initial["messages"]]
+        # Refresh the bounded workspace snapshot for each follow-up as files may have changed.
+        if self._owns_action and isinstance(self._action, NeedleActionModel):
+            self._action.set_system(build_translator_prompt(self.config))
+        contexts = ContextManager(
+            self.config, build_system_prompt(self.registry.list(), self.config)
+        )
         deps = RuntimeDeps(
             self._reasoning,
             self._action,
             self.registry,
-            self._contexts,
+            contexts,
             self.config,
             cancelled,
             self._approve,
@@ -108,7 +135,7 @@ class Agent:
             final = {**final, "status": "ERROR", "final_answer": f"Runtime failed: {exc}"}
         # Bound returned history too (a tagless/final response bypasses observe).
         try:
-            final["messages"] = self._contexts.build(final["messages"])[1:]
+            final["messages"] = contexts.build(final["messages"])[1:]
         except ValueError as exc:
             final = {**final, "status": "ERROR", "final_answer": str(exc), "messages": []}
         yield {

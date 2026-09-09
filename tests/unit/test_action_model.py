@@ -181,3 +181,189 @@ def test_v1_base_url_not_duplicated(server_url: str) -> None:
     model = LlamaServerReasoningModel(base_url=server_url + "/v1/")
     assert model._base == server_url + "/v1"
     assert "hi" in model.generate([{"role": "user", "content": "hello", "kind": "request"}])
+
+
+def test_multiple_native_calls_are_rejected_as_non_atomic():
+    from agent_runtime.models.action import ActionOutputError
+    from agent_runtime.models.needle import parse_needle_response
+
+    with pytest.raises(ActionOutputError, match="multiple calls"):
+        parse_needle_response(
+            {
+                "type": "call",
+                "confidence": 0.99,
+                "function_calls": [
+                    {"name": "read_directory", "arguments": {"path": "."}},
+                    {"name": "read_file", "arguments": {"path": "a.txt"}},
+                ],
+            }
+        )
+
+
+def test_needle_receives_configured_generation_budget_and_default_instructions():
+    class Client(StubNeedleClient):
+        def complete(self, action, max_new_tokens):
+            assert max_new_tokens == 4096
+            return self.response
+
+    tools = _tools()
+    adapter = NeedleActionModel(
+        tools,
+        client=Client({"type": "respond", "confidence": 0.1}),
+        max_new_tokens=4096,
+    )
+    adapter.translate("hello", tools)
+    assert "not a planner" in adapter._system
+    assert "full finished file content" in adapter._system
+
+
+class _CannedFunctionGemma:
+    """FunctionGemma adapter with the HTTP layer replaced by canned outputs."""
+
+    def __init__(self, tools, outputs):
+        from agent_runtime.models.functiongemma import FunctionGemmaActionModel
+
+        self.adapter = FunctionGemmaActionModel.__new__(FunctionGemmaActionModel)
+        FunctionGemmaActionModel.__init__(self.adapter, tools)
+        self.outputs = list(outputs)
+        self.prompts = []
+
+    def translate(self, action, tools):
+        text, finished = self.outputs.pop(0)
+        self.adapter._complete = lambda prompt: self._record(prompt, text, finished)
+        return self.adapter.translate(action, tools)
+
+    def _record(self, prompt, text, finished):
+        self.prompts.append(prompt)
+        return text, finished
+
+
+def _fg_tools():
+    return _tools()
+
+
+def test_functiongemma_translates_single_call() -> None:
+    tools = _fg_tools()
+    canned = _CannedFunctionGemma(
+        tools,
+        [("<start_function_call>call:calculator{expression:<escape>6*7<escape>}", True)],
+    )
+    result = canned.translate("Calculate 6 * 7.", tools)
+    assert result.selected_tool == "calculator"
+    assert result.arguments == {"expression": "6*7"}
+    assert result.confidence == 1.0
+    assert "<start_function_declaration>" in canned.prompts[0]
+    assert "Calculate 6 * 7." in canned.prompts[0]
+
+
+def test_functiongemma_accepts_server_consumed_stop_token() -> None:
+    tools = _fg_tools()
+    canned = _CannedFunctionGemma(
+        tools,
+        [("<start_function_call>call:get_time{timezone:<escape>UTC<escape>}", True)],
+    )
+    result = canned.translate("Get the time.", tools)
+    assert result.selected_tool == "get_time"
+
+
+def test_functiongemma_rejects_truncated_and_multiple_calls() -> None:
+    from agent_runtime.models.action import ActionOutputError
+
+    tools = _fg_tools()
+    for text, finished in (
+        ("<start_function_call>call:calculator{expression:<escape>6*7", False),
+        ("no call here", True),
+        (
+            "<start_function_call>call:a{}<end_function_call>"
+            "<start_function_call>call:b{}<end_function_call>",
+            True,
+        ),
+        ("<start_function_call>call:nope{arg:<escape>x<escape>}<end_function_call>", True),
+    ):
+        canned = _CannedFunctionGemma(tools, [(text, finished)])
+        with pytest.raises(ActionOutputError):
+            canned.translate("Do something.", tools)
+
+
+def test_functiongemma_parses_bare_none_and_commas_in_values() -> None:
+    from agent_runtime.models.functiongemma import parse_function_call
+
+    name, arguments = parse_function_call(
+        "<start_function_call>call:search_files{query:<escape>a, b<escape>,"
+        "path:<escape>.<escape>}<end_function_call>"
+    )
+    assert (name, arguments) == ("search_files", {"query": "a, b", "path": "."})
+
+
+def test_functiongemma_render_parse_round_trip() -> None:
+    from agent_runtime import AgentConfig
+    from agent_runtime.models.functiongemma import (
+        _coerce_arguments,
+        parse_function_call,
+        render_function_call,
+    )
+    from agent_runtime.tools.registry import create_default_registry
+
+    tools = {t.name: t for t in create_default_registry(AgentConfig()).list()}
+    cases = [
+        ("get_time", {}),
+        ("read_file", {"path": "src/auth.py"}),
+        ("git_log", {"limit": 5, "path": "."}),
+        ("search_files", {"query": "a, b {c}", "path": "."}),
+        ("get_time", {"timezone": None}),
+        ("run_python", {"code": "print('hi')", "timeout_s": 30}),
+    ]
+    for name, arguments in cases:
+        parsed = parse_function_call(render_function_call(name, arguments))
+        assert parsed[0] == name
+        assert _coerce_arguments(tools[name], parsed[1]) == arguments
+
+
+class ExplodingNeedleClient:
+    """Fails if touched: well-formed writes must never reach the engine."""
+
+    resets = 0
+
+    def reset(self) -> None:
+        self.resets += 1
+
+    def complete(self, action: str, max_new_tokens: int) -> dict:
+        raise AssertionError("engine must not be consulted for a clean write action")
+
+
+def test_clean_write_action_copies_payload_without_engine() -> None:
+    tools = _tools()
+    client = ExplodingNeedleClient()
+    result = NeedleActionModel(tools, client=client).translate(
+        'Use write_file to write the file "test.txt" with this exact text:\n'
+        "```text\ntest Hello World\n```",
+        tools,
+    )
+    assert result.selected_tool == "write_file"
+    assert result.arguments == {"path": "test.txt", "content": "test Hello World"}
+    assert result.confidence == 1.0
+    assert client.resets == 0
+
+
+def test_write_without_literal_payload_falls_through_to_engine() -> None:
+    tools = _tools()
+    client = StubNeedleClient({"type": "respond", "function_calls": [], "confidence": 0.4})
+    result = NeedleActionModel(tools, client=client).translate(
+        'Use write_file to write the file "test.txt".', tools
+    )
+    assert result.selected_tool is None
+    assert client.resets == 1
+
+
+def test_non_write_action_still_uses_engine() -> None:
+    tools = _tools()
+    client = StubNeedleClient(
+        {
+            "type": "call",
+            "function_calls": [{"name": "calculator", "arguments": {"expression": "1+1"}}],
+            "confidence": 0.9,
+        }
+    )
+    result = NeedleActionModel(tools, client=client).translate("Calculate 1 + 1.", tools)
+    assert result.selected_tool == "calculator"
+    assert client.resets == 1

@@ -37,4 +37,4 @@ jobs:
           enable-cache: true
       - run: uv sync --locked --group dev --group browser
       - run: uv run --group browser playwright install --with-deps chromium
-      - run: uv run --group browser pytest tests/e2e/test_browser.py
+      - run: uv run --group browser pytest tests/e2e

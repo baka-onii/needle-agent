@@ -95,38 +95,42 @@ def test_followup_receives_prior_context():
     assert any("My favorite color is green" in m["content"] for m in model.contexts[-1])
 
 
-def test_write_approval_and_path_safety(tmp_path: Path):
-    class WriteAction:
+def test_severe_tool_approval_and_path_safety(tmp_path: Path):
+    (tmp_path / "note.txt").write_text("hello")
+
+    class DeleteAction:
         path = "note.txt"
 
         def translate(self, action, tools):
             return NeedleResult(
-                selected_tool="write_file",
-                arguments={"path": self.path, "content": "hello"},
+                selected_tool="delete_file",
+                arguments={"path": self.path},
                 confidence=0.99,
             )
 
-    action = WriteAction()
+    action = DeleteAction()
     approved = []
     config = AgentConfig(workspace_root=str(tmp_path))
     agent = Agent(
         config,
-        Reasoning(["<tool>Write note.txt.</tool>", "Denied."]),
+        Reasoning(['<tool>Use delete_file to delete the file "note.txt".</tool>', "Denied."]),
         action,
         approve_fn=lambda call: approved.append(call) or False,
     )
-    assert agent.run("Write")["step_count"] == 0
+    assert agent.run("Delete")["step_count"] == 0
     assert len(approved) == 1
-    assert not (tmp_path / "note.txt").exists()
+    assert (tmp_path / "note.txt").exists()
     action.path = "../outside.txt"
     approved.clear()
     agent = Agent(
         config,
-        Reasoning(["<tool>Write outside.</tool>", "Blocked."]),
+        Reasoning(
+            ['<tool>Use delete_file to delete "../outside.txt".</tool>', "Blocked."]
+        ),
         action,
         approve_fn=lambda call: approved.append(call) or True,
     )
-    assert agent.run("Write")["step_count"] == 0
+    assert agent.run("Delete")["step_count"] == 0
     assert approved == []  # unsafe path never even asks permission
 
 

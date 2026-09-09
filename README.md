@@ -51,8 +51,7 @@ uv run needle-agent serve --workspace examples/workspace \
 Or use your existing llama.cpp / Ornith server:
 
 ```sh
-uv run needle-agent serve --workspace /path/to/project \
-  --base-url http://127.0.0.1:8080 --model ornith
+uv run needle-agent serve --workspace /path/to/project --base-url http://127.0.0.1:8080 --model ornith
 ```
 
 Both bare server URLs and URLs ending in `/v1` are supported. A hosted compatible
@@ -61,6 +60,7 @@ browser setting or repository file:
 
 | Environment variable | Purpose |
 | --- | --- |
+| `NEEDLE_CONFIG` | Explicit TOML/JSON configuration file |
 | `NEEDLE_WORKSPACE` | Default filesystem root; otherwise the current directory |
 | `NEEDLE_LLM_BASE_URL` | Reasoning server base URL |
 | `NEEDLE_LLM_MODEL` | Model ID accepted by that server |
@@ -102,13 +102,19 @@ the live-model benchmark has not been rerun as part of this implementation.
 
 ## What you can interact with
 
-- **Playground:** multi-turn conversations, streamed action/gate/result events, collapsible
-  tool cards, `ask_user` pause/resume, per-write approval, and cooperative cancellation.
+- **Playground:** streamed model reasoning, draft tool requests, and answers; collapsible,
+  resizable reasoning panels with inspectable model messages; tool cards, `ask_user`
+  pause/resume, approval for severe actions, and cancellation.
 - **Files:** browse the configured workspace and inspect bounded text previews.
-- **Tools:** inspect all seven canonical definitions and their validation schemas.
+- **Tools:** inspect all thirty-three canonical definitions and their validation schemas.
 - **Run history:** real outcomes, step counts, durations, and downloadable JSON traces.
-- **Settings:** demo/live mode, model endpoint, confidence thresholds, step limits,
-  read-only mode, and explicit permission to create parent directories.
+- **Settings:** editable reasoning/translator/confirmation prompts, model generation budgets,
+  confidence thresholds, retry/context/search limits, read-only mode, and config import/export.
+- **Appearance:** light/dark switch in the top bar; follows your system until you choose a theme,
+  then remembers that choice across reloads.
+- **Chat management:** delete a conversation with its sidebar trash button. Confirmation is
+  required; its messages and run traces are removed, **not workspace files**. Active runs must
+  finish or be stopped first.
 
 Use **Enter** to send, **Shift+Enter** for a newline, and **Ctrl/Cmd+K** for a new conversation.
 Reloading the browser reconnects to active runs, including pending questions/approvals.
@@ -120,13 +126,43 @@ uv run needle-agent chat --demo --workspace examples/workspace --trace
 uv run needle-agent run --demo 'Calculate 2 * (15 + 3)' --json
 
 # Live terminal conversation
-uv run needle-agent chat --workspace /path/to/project \
-  --base-url http://127.0.0.1:11434/v1 --model qwen2.5:3b --trace
+uv run needle-agent chat --workspace /path/to/project --base-url http://127.0.0.1:11434/v1 --model qwen2.5:3b --trace
+
+# One command: translator server (fine-tuned GGUF) + live harness
+uv run needle-agent live --workspace /path/to/project --fg-gguf /path/to/fg-tools.gguf
+uv run needle-agent live --workspace /path/to/project --fg-gguf /path/to/fg-tools.gguf --ui  # browser GUI
 ```
 
 Terminal commands: `/new` (reset conversation), `/tools`, `/exit`. Both terminal and web
-interfaces ask permission before every write. Library callers can inject their own
+interfaces ask permission before severe actions (deletion, code execution, text
+edits, commits); simple writes run freely. Library callers can inject their own
 approval policy. Recoverable tool errors become observations; internal errors stop the run.
+
+### Configuration files, prompts, and CLI overrides
+
+Defaults now live in **`config/defaults.toml`** and **`config/prompts/*.md`**, not embedded
+system-prompt strings. They are also bundled into the installed package. Create your own copy:
+
+```sh
+uv run needle-agent config init needle.toml
+# Edit needle.toml and prompts/{reasoning,translator,confirmation}.md.
+uv run needle-agent serve --config needle.toml --workspace examples/workspace --demo
+
+# Individual prompt files and numeric overrides work with run, chat, and serve.
+uv run needle-agent chat --config needle.toml --reasoning-prompt prompts/reasoning.md \
+  --llm-max-tokens 4096 --needle-max-tokens 4096 --set max_search_results=25
+
+# Resolve file references into a portable config with inline prompts (no API keys).
+uv run needle-agent config show --config needle.toml > portable.toml
+```
+
+Precedence: **packaged defaults → explicit config → environment → CLI overrides**.
+File-relative paths resolve beside the config file. Workspace config files are **not**
+auto-discovered or silently trusted; use `--config` or `NEEDLE_CONFIG`. File changes take
+effect when reloaded/restarted. UI changes apply to the next run and stay session-local;
+export them to survive a server restart. The UI can import the portable file above but
+cannot read arbitrary server-side prompt paths or change the server's workspace/weights.
+See [Configuration reference](docs/configuration.md) for fields, bounds, and examples.
 
 ### Python API
 
@@ -147,11 +183,81 @@ Supply `reasoning=` and `action=` to replace either model without changing the g
 returns `NeedleResult`. `ask_fn` abstracts human input. Dependencies stay outside the
 plain-data `AgentState`.
 
-For streaming, iterate `agent.stream(request, history=...)`. It yields `phase`, `action`,
-`translation`, `validated`, `confidence`, `safety`, `tool_start`, `tool_result`, and
-`rejected` events, then a final `complete` event containing `state`. Alternatively, pass
-`on_event=` to `run()`. Pass a thread-safe `cancelled=` predicate to stop at node boundaries.
-Closing a stream alone does not constitute cancellation.
+For streaming, iterate `agent.stream(request, history=...)`. Model calls emit `model_start`,
+`model_status`, `model_delta`, and `model_end`, alongside the existing `phase`, `action`,
+`translation`, `validated`, `confidence`, `confirmation`, `safety`, `tool_start`, `tool_result`,
+and `rejected` events. The last `complete` event contains the terminal `state`. Alternatively,
+pass `on_event=` to `run()`. A thread-safe `cancelled=` predicate stops an active HTTP stream
+and prevents subsequent tools. Closing a stream alone does not constitute cancellation.
+
+### Live model output in the chat
+
+Expand a **Reasoning** card to see provider-exposed reasoning or model commentary as it
+arrives. **Expand / Shrink** changes the viewport; the lower resize handle is also draggable.
+**Model conversation** reveals the messages sent to the adapter and its raw reply. Both
+panel disclosure and scroll position are preserved while streaming. Translations appear
+inside the corresponding tool card, including the exact request and structured result.
+
+`<tool>` and `<final>` tags are recognized incrementally across token boundaries. Draft tool
+cards are visibly **not executed**; final answers render as streaming Markdown, including
+unfinished code blocks. The full response must finish successfully before the normal parser,
+translator, validation, confidence, and approval gates run. A late final answer still wins
+over earlier tool drafts. Interrupted streams retain visible partial output, not a successful
+answer or executable partial call.
+
+The browser uses a **1,000 ms initial buffer**, measured delivery rate, and bounded catch-up
+to smooth uneven token delivery. Short/completed responses catch up promptly. This is a
+presentation buffer, not an execution delay. Change it under **Settings → Streaming & model
+conversation**; `0` displays incoming text immediately. Reduced-motion preferences skip typing
+animation. Reconnecting restores the received prefix without replaying it token by token.
+
+Streaming is enabled by default for compatible reasoning servers. If a server returns JSON
+instead of SSE, it is labelled **buffered**. If it rejects streaming altogether, disable it
+with **Settings** or `--no-stream`; requests are not silently retried. Needle's current
+single-turn `complete()` API returns a whole translation, so that output is shown honestly
+as buffered rather than inventing token events. The offline demo explicitly simulates delivery.
+No unavailable/private reasoning is fabricated or requested; only text returned by the adapter
+is displayed. See [Streaming reference](docs/streaming.md) for the protocol, limits, and adapters.
+
+### Concrete writes, workspace paths, and selection review
+
+The reasoning model must **compose the actual file content**, not tell the small translator
+to generate it. This is one atomic write, expressed in natural language:
+
+````text
+<tool>Use write_file to write the file "test.txt" with this exact text:
+```text
+1. print(): Display values.
+2. len(): Count items.
+```
+</tool>
+````
+
+For a request for ten functions, the payload must contain all ten. The runtime rejects writes
+with no explicit literal payload and rejects translated content that differs from that payload.
+Fences preserve indentation, blank lines, and literal protocol tags. A longer fence can contain
+triple backticks. The newline immediately before the closing fence is a delimiter; include an
+extra newline if the file should end with one. A small output budget may truncate long payloads:
+reasoning now defaults to **4,096** output tokens and Needle to **2,048**, both configurable.
+
+Both models receive the real workspace root and a bounded directory snapshot. Use **`.`** for
+that root, never guessed aliases such as `root` or `user/home`. Nested directory observations
+show workspace-relative paths. Explicit tool names and quoted paths are checked against the
+translator's proposal; wrong paths are sent back for correction, not silently remapped.
+
+On low confidence or recoverable failure, the **reasoning model** receives the original action,
+proposed tool and arguments, sorted available candidates, and an explicit question about the
+highest-ranked tool. It must confirm/correct the choice with a new atomic `<tool>Use NAME to
+...</tool>` action or finish. The `confirmation` event appears in expanded tool cards and CLI
+traces. Native Needle may supply only the selected tool's score; alternatives are never invented.
+As in spec §24, confirmation **does not bypass** retranslation, validation, confidence, or safety.
+
+Approval for severe actions belongs to the runtime, never `ask_user`. Identical
+successful mutations, further actions on a path denied in the same run, repeated
+answered questions, and common permission questions are blocked before another
+interaction. Repeated identical failed calls have a bounded
+budget. Records live separately from trimmed model context, so context eviction cannot reset these
+per-run guards. A new user turn starts a fresh run, allowing an intentional new request.
 
 ## Runtime guarantees and limits
 
@@ -163,11 +269,14 @@ REASON → PARSE → TRANSLATE → SANITIZE → VALIDATE → CONFIDENCE
 ```
 
 - Only a well-formed `<tool>` block contains executable intent. Final/tagless answers
-  never execute arbitrary text. Multiple actions use the first, then return to reasoning.
+  never execute arbitrary text. Multiple blocks use the first, then return to reasoning.
+  Common compound instructions within a block are rejected; multiple translated calls are
+  rejected outright. Natural-language checks are conservative, not a proof of semantic intent.
 - Invalid calls do not reach confidence or execution, regardless of their score.
 - Read/search/calculate/time clear **0.50** by default; write/ask clear **0.85**.
 - Defaults: **20 tool steps**, **3 consecutive non-executing turns**, **20,000 characters**
-  per tool output, and **32,000 characters** of model context.
+  per tool output, **32,000 characters** of model context, and at most **2 attempts** at an
+  identical failing tool call before it is blocked. These limits are configurable.
 - The full system prompt, canonical tool descriptions, and original/current requests stay
   pinned. Older observations are dropped first; oversized recent output is truncated.
   Requests that cannot fit the pinned budget are rejected rather than exceeding it.
@@ -193,11 +302,16 @@ Paths are checked before operations, not protected by an OS sandbox against a ho
 concurrent process replacing directory entries. Custom tool handlers are trusted Python
 code and must enforce their own safety rules. Confidence scores are not proof that a call
 matches user intent; review write approvals. Cancellation prevents subsequent operations,
-but cannot undo a write or instantly abort an in-flight HTTP/C-engine call.
+but cannot undo a write. Connected HTTP streams are interrupted on Stop; initial connection
+work, generate-only adapters, and Needle's blocking C-engine call remain cooperative.
 
 Conversations/runs live **in server memory**, expire after two hours of inactivity, and
 reset on server restart. Histories are bounded (24 conversations / 60 runs per session).
-Export traces to retain them. Browser tokens are stored locally; model keys are not.
+Export traces to retain them. Deleting a chat also deletes its stored runs and traces.
+Browser tokens and your theme choice are stored locally; model keys are not. Model input
+traces can contain workspace/file content. Disable `capture_model_inputs` for new runs if you
+do not want their sent messages retained. Each run caps additional model trace details at
+4 MB / 16,000 events, with a visible notice; tool results and the terminal answer remain.
 
 ## Development and tests
 
@@ -214,13 +328,16 @@ Optional real-browser tests (otherwise skipped):
 ```sh
 uv sync --locked --group dev --group browser
 uv run --group browser playwright install chromium
-uv run --group browser pytest tests/e2e/test_browser.py
+uv run --group browser pytest tests/e2e
 ```
 
 `NEEDLE_BROWSER_EXECUTABLE` can point to an existing Chromium installation. The tests cover
 real tool loops, strict Needle result parsing, schema validation, path/symlink safety,
 context budgets, long runs, SSE recovery, session isolation, approval/denial, cancellation,
-CLI interaction, mobile layout, untrusted-content rendering, and explicit live-backend errors.
+CLI configuration, exact write payloads, selection reviews, repeated-interaction guards,
+configuration import/export, chat deletion, light/dark/mobile layouts, untrusted-content
+rendering, true HTTP/SSE delivery, split tags, partial code blocks, stream cancellation,
+replay, adaptive pacing, stable reasoning panels, and explicit live-backend errors.
 No test requires model weights or an API key.
 
 `uv.lock` records the resolved dependency versions. The frontend ships as static package

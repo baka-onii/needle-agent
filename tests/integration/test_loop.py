@@ -48,9 +48,16 @@ def workspace(tmp_path: Path) -> Path:
 
 
 def _agent(workspace: Path, reasoning: ScriptedReasoning, action: StubAction, **kw: Any) -> Agent:
+    approve_fn = kw.pop("approve_fn", None)
     config = AgentConfig(workspace_root=str(workspace), **kw)
     registry = create_default_registry(config)
-    return Agent(config=config, reasoning=reasoning, action=action, registry=registry)
+    return Agent(
+        config=config,
+        reasoning=reasoning,
+        action=action,
+        registry=registry,
+        approve_fn=approve_fn,
+    )
 
 
 def test_reasoning_backend_failure_ends_run_gracefully(workspace: Path) -> None:
@@ -209,3 +216,159 @@ def test_invalid_tool_becomes_observation_and_recovers(workspace: Path) -> None:
     assert state["status"] == "COMPLETED"
     assert state["step_count"] == 0  # high-confidence invalid never executes
     assert any("Unknown tool" in m.get("content", "") for m in state["messages"])
+
+
+def test_content_block_write_attaches_without_approval(workspace: Path) -> None:
+    reasoning = ScriptedReasoning(
+        [
+            '<tool>Use write_file to write the file "note.txt". '
+            "<content>Hello block</content></tool>",
+            "<final>Done.</final>",
+        ]
+    )
+    action = StubAction(
+        {
+            "write_file": NeedleResult(
+                selected_tool="write_file", arguments={"path": "note.txt"}, confidence=1.0
+            )
+        }
+    )
+    state = _agent(workspace, reasoning, action).run("write a note")
+    assert state["status"] == "COMPLETED"
+    assert state["step_count"] == 1
+    assert (workspace / "note.txt").read_text() == "Hello block"
+
+
+def test_translator_payload_output_is_discarded(workspace: Path) -> None:
+    reasoning = ScriptedReasoning(
+        [
+            '<tool>Use write_file to write the file "note.txt". '
+            "<content>real bytes</content></tool>",
+            "<final>Done.</final>",
+        ]
+    )
+    action = StubAction(
+        {
+            "write_file": NeedleResult(
+                selected_tool="write_file",
+                arguments={"path": "note.txt", "content": "invented garbage"},
+                confidence=1.0,
+            )
+        }
+    )
+    state = _agent(workspace, reasoning, action).run("write a note")
+    assert state["step_count"] == 1
+    assert (workspace / "note.txt").read_text() == "real bytes"
+
+
+def test_two_block_replace_attaches_positionally_with_approval(workspace: Path) -> None:
+    (workspace / "note.txt").write_text("old words here")
+    approvals = []
+    reasoning = ScriptedReasoning(
+        [
+            '<tool>Use replace_text to fix "note.txt". '
+            "<text-1>old words</text-1> <text-2>new words</text-2></tool>",
+            "<final>Done.</final>",
+        ]
+    )
+    action = StubAction(
+        {
+            "replace_text": NeedleResult(
+                selected_tool="replace_text", arguments={"path": "note.txt"}, confidence=1.0
+            )
+        }
+    )
+    agent = _agent(
+        workspace,
+        reasoning,
+        action,
+        approve_fn=lambda call: approvals.append(call) or True,
+    )
+    state = agent.run("fix the note")
+    assert state["step_count"] == 1
+    assert len(approvals) == 1
+    assert (workspace / "note.txt").read_text() == "new words here"
+
+
+def test_block_count_mismatch_never_executes(workspace: Path) -> None:
+    (workspace / "note.txt").write_text("keep me")
+    reasoning = ScriptedReasoning(
+        [
+            '<tool>Use replace_text to fix "note.txt". <content>only one</content></tool>',
+            "<final>Gave up.</final>",
+        ]
+    )
+    action = StubAction(
+        {
+            "replace_text": NeedleResult(
+                selected_tool="replace_text", arguments={"path": "note.txt"}, confidence=1.0
+            )
+        }
+    )
+    state = _agent(workspace, reasoning, action).run("fix the note")
+    assert state["step_count"] == 0
+    assert (workspace / "note.txt").read_text() == "keep me"
+
+
+def test_blocks_on_blockless_tool_are_rejected(workspace: Path) -> None:
+    reasoning = ScriptedReasoning(
+        [
+            '<tool>Use read_file to read the file "main.py". <content>stowaway</content></tool>',
+            "<final>Gave up.</final>",
+        ]
+    )
+    action = StubAction(
+        {
+            "read_file": NeedleResult(
+                selected_tool="read_file", arguments={"path": "main.py"}, confidence=1.0
+            )
+        }
+    )
+    state = _agent(workspace, reasoning, action).run("read main")
+    assert state["step_count"] == 0
+
+
+def test_severe_tool_asks_and_honors_denial(workspace: Path) -> None:
+    approvals = []
+    reasoning = ScriptedReasoning(
+        ["<tool>Use run_python to run code.</tool>", "<final>Denied.</final>"]
+    )
+    action = StubAction(
+        {
+            "run_python": NeedleResult(
+                selected_tool="run_python", arguments={"code": "print(1)"}, confidence=1.0
+            )
+        }
+    )
+    agent = _agent(
+        workspace,
+        reasoning,
+        action,
+        approve_fn=lambda call: approvals.append(call) or False,
+    )
+    state = agent.run("run code")
+    assert state["step_count"] == 0
+    assert len(approvals) == 1
+
+
+def test_severe_tool_executes_when_approved(workspace: Path) -> None:
+    approvals = []
+    reasoning = ScriptedReasoning(
+        ["<tool>Use run_python to run code.</tool>", "<final>Ran it.</final>"]
+    )
+    action = StubAction(
+        {
+            "run_python": NeedleResult(
+                selected_tool="run_python", arguments={"code": "print(41 + 1)"}, confidence=1.0
+            )
+        }
+    )
+    agent = _agent(
+        workspace,
+        reasoning,
+        action,
+        approve_fn=lambda call: approvals.append(call) or True,
+    )
+    state = agent.run("run code")
+    assert state["step_count"] == 1
+    assert len(approvals) == 1

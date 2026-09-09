@@ -17,7 +17,7 @@ def total_chars(messages: list[dict[str, Any]]) -> int:
 
 
 def _observation(message: dict[str, Any]) -> bool:
-    return message.get("kind") in {"observation", "confirmation"} or str(
+    return message.get("kind") in {"observation", "confirmation", "permission"} or str(
         message.get("content", "")
     ).startswith(("Observation from tool", "Tool error", "The action translator is uncertain"))
 

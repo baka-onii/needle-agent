@@ -39,12 +39,34 @@ def truncate_text(text: str, limit: int) -> str:
     return text[: limit - len(marker)] + marker
 
 
+def approval_summary(call: ToolCall) -> str:
+    """One human-readable line per call for approval prompts (CLI and web)."""
+    arguments = call.arguments
+    target = (
+        arguments.get("path")
+        or arguments.get("source")
+        or arguments.get("destination")
+        or arguments.get("branch")
+        or arguments.get("message")
+        or arguments.get("question")
+        or arguments.get("command")
+        or arguments.get("code")
+        or arguments.get("query")
+        or ""
+    )
+    target = truncate_text(str(target), 120).replace("\n", " ")
+    return f"{call.name} {target}".rstrip()
+
+
 @dataclass
 class Tool:
     name: str
     description: str
     parameters: dict[str, Any] = field(default_factory=dict)
     handler: Callable[..., str] | None = None
+    # Payload arguments filled from <content> / <text-N> blocks, in order, by
+    # the runtime after translation. The translator never invents them.
+    payload_args: tuple[str, ...] = ()
 
     def reasoning_description(self) -> str:
         lines = [f"- {self.name}: {self.description}"]
@@ -53,6 +75,13 @@ class Tool:
         for arg, schema in props.items():
             opt = "" if arg in required else " (optional)"
             lines.append(f"    - {arg}{opt}: {schema.get('description', '')}".rstrip())
+        if len(self.payload_args) == 1:
+            lines.append(f"    - payload: one <content> block fills {self.payload_args[0]!r}")
+        elif self.payload_args:
+            filled = ", ".join(
+                f"<text-{i}> fills {arg!r}" for i, arg in enumerate(self.payload_args, 1)
+            )
+            lines.append(f"    - payloads: {filled}")
         return "\n".join(lines)
 
     def needle_schema(self) -> dict[str, Any]:

@@ -71,7 +71,7 @@ def test_http_reasoning_and_needle_single_turn_contract(reasoning_server):
 
         def complete(self, action, max_new_tokens):
             self.calls.append(action)
-            assert max_new_tokens == 256
+            assert max_new_tokens == AgentConfig().needle_max_tokens
             return {
                 "type": "call",
                 "confidence": 0.92,
@@ -111,5 +111,15 @@ def test_auth_is_not_forwarded_on_redirect(reasoning_server):
     model = OpenAICompatibleReasoningModel(base, api_key="test-only-key")
     with pytest.raises(RuntimeError, match="HTTP 302") as error:
         model.generate([{"role": "user", "content": "hi"}])
+    assert len(requests) == 1
+    assert "test-only-key" not in str(error.value)
+
+
+def test_streaming_auth_is_not_forwarded_on_redirect(reasoning_server):
+    base, requests, redirect = reasoning_server
+    redirect.append(base + "/should-not-be-requested")
+    model = OpenAICompatibleReasoningModel(base, api_key="test-only-key")
+    with pytest.raises(RuntimeError, match="HTTP 302") as error:
+        list(model.stream([{"role": "user", "content": "hi"}]))
     assert len(requests) == 1
     assert "test-only-key" not in str(error.value)

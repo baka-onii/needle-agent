@@ -8,11 +8,16 @@ from collections.abc import Callable
 from agent_runtime.config import AgentConfig
 from agent_runtime.execution.validator import check_schema
 from agent_runtime.tools.base import Tool, ToolError
+from agent_runtime.tools.editing import editing_tools
+from agent_runtime.tools.environment import environment_tools
+from agent_runtime.tools.execution import execution_tools
 from agent_runtime.tools.filesystem import filesystem_tools
+from agent_runtime.tools.git import git_tools
 from agent_runtime.tools.interaction import make_ask_user_tool
 from agent_runtime.tools.utility import utility_tools
+from agent_runtime.tools.web import web_tools
 
-FORBIDDEN_TOOLS = frozenset({"shell", "terminal", "execute_command", "run_python"})
+FORBIDDEN_TOOLS = frozenset({"shell", "terminal", "execute_command"})
 
 
 class ToolRegistry:
@@ -45,6 +50,15 @@ def create_default_registry(
     config: AgentConfig, ask_fn: Callable[[str], str] | None = None
 ) -> ToolRegistry:
     registry = ToolRegistry()
-    for tool in [*filesystem_tools(config), *utility_tools(config), make_ask_user_tool(ask_fn)]:
+    for tool in [
+        *filesystem_tools(config),
+        *editing_tools(config),
+        *execution_tools(config),
+        *git_tools(config),
+        *web_tools(config),
+        *environment_tools(config),
+        *utility_tools(config),
+        make_ask_user_tool(ask_fn),
+    ]:
         registry.register(tool)
     return registry

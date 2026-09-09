@@ -16,7 +16,8 @@ def make_ask_user_tool(ask_fn: Callable[[str], str] | None = None) -> Tool:
 
     return Tool(
         name="ask_user",
-        description="Ask the human a clarifying question when the request is ambiguous.",
+        description="Ask the human for genuinely missing requirements. Not for write permission: "
+        "the runtime handles approval. Never repeat an answered question.",
         parameters={
             "type": "object",
             "properties": {

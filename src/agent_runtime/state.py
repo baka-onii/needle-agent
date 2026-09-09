@@ -9,12 +9,15 @@ from typing import Any, TypedDict
 class AgentState(TypedDict):
     messages: list[dict[str, Any]]
     current_action: str | None
+    current_payloads: list[str]
     needle_result: dict[str, Any] | None
     tool_call: dict[str, Any] | None
     last_tool_result: dict[str, Any] | None
     step_count: int
+    model_turn: int
     max_tool_steps: int
     stall_count: int
+    action_records: list[dict[str, Any]]
     final_answer: str | None
     status: str
 
@@ -23,12 +26,15 @@ def create_initial_state(user_request: str, max_tool_steps: int) -> AgentState:
     return {
         "messages": [{"role": "user", "content": user_request}],
         "current_action": None,
+        "current_payloads": [],
         "needle_result": None,
         "tool_call": None,
         "last_tool_result": None,
         "step_count": 0,
+        "model_turn": 0,
         "max_tool_steps": max_tool_steps,
         "stall_count": 0,
+        "action_records": [],
         "final_answer": None,
         "status": "RUNNING",
     }
