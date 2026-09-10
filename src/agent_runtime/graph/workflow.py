@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from agent_runtime.config import AgentConfig
 from agent_runtime.context.manager import ContextManager
+from agent_runtime.context.manager import total_chars as context_chars
 from agent_runtime.execution.confidence import (
     is_confident,
     ranked_candidates,
@@ -49,6 +50,11 @@ from agent_runtime.state import AgentState
 from agent_runtime.tools.base import ToolCall, ToolError, ToolResult, truncate_text
 from agent_runtime.tools.filesystem import resolve_safe_path
 from agent_runtime.tools.registry import ToolRegistry
+
+# Training-time stand-ins for bulk payload text (e.g. __PAYLOAD_COMMAND__).
+# A translator emitting one means the bulk text never arrived; executing it
+# would run garbage, so translate rejects it and asks for real blocks.
+_PLACEHOLDER = re.compile(r"__PAYLOAD_[A-Z_]+__")
 
 
 @dataclass
@@ -181,6 +187,7 @@ def build_workflow(deps: RuntimeDeps):
 
     def reason(state: AgentState) -> dict:
         prompt = contexts.build(state["messages"])
+        prompt_chars = context_chars(prompt)
         turn = state["model_turn"] + 1
         model_id = f"reason-{turn}"
         stream_method = getattr(reasoning, "stream", None)
@@ -190,6 +197,7 @@ def build_workflow(deps: RuntimeDeps):
             model_id=model_id,
             component="reasoning",
             turn=turn,
+            context_chars=prompt_chars,
             model=getattr(reasoning, "model_name", type(reasoning).__name__),
             streamed=streaming,
             input_messages=[{"role": m["role"], "content": m["content"]} for m in prompt]
@@ -430,6 +438,28 @@ def build_workflow(deps: RuntimeDeps):
                         }
                     }
                 )
+            # Training placeholders (e.g. __PAYLOAD_COMMAND__) must never
+            # execute: with blocks attached they are already overwritten
+            # above; without blocks the action is missing its bulk text.
+            # Fail closed and ask for a reissue with real block content.
+            # Unknown tools skip this scan and fail later in validation.
+            try:
+                selected = registry.get(result.selected_tool or "")
+            except ToolError:
+                selected = None
+            for arg in selected.payload_args if selected is not None else ():
+                value = result.arguments.get(arg)
+                if isinstance(value, str) and _PLACEHOLDER.search(value):
+                    blocks = (
+                        "one <content> block"
+                        if len(selected.payload_args) == 1
+                        else "<text-1>, <text-2>, ... blocks"
+                    )
+                    raise ActionOutputError(
+                        f"Tool {selected.name!r} needs its {arg!r} text in {blocks}, "
+                        "not a placeholder. Reissue the action with the "
+                        "complete bulk text in payload blocks."
+                    )
         except Exception as exc:
             emit(
                 "model_end",

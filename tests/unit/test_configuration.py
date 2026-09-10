@@ -155,3 +155,9 @@ def test_reasoning_prompt_documents_payload_contracts():
     prompt = build_system_prompt(tools)
     assert "payload: one <content> block fills 'content'" in prompt
     assert "<text-1> fills 'old_text', <text-2> fills 'new_text'" in prompt
+
+
+def test_reasoning_prompt_guides_temp_file_staging():
+    prompt = AgentConfig().reasoning_prompt
+    assert "temp file" in prompt.casefold()
+    assert "scratch/" in prompt

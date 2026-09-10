@@ -10,6 +10,12 @@
   The command starts `llama-server` with the GGUF if port 8081 is free and
   stops only servers it started itself. Reasoning model must already serve
   OpenAI-compatible chat on the configured `llm_base_url` (default 8080).
+- Fresh-clone translator setup: build with `scripts/build-llama-server.bat`
+  (Windows) or `scripts/build-llama-server.sh` (Linux) — VS Build Tools/gcc +
+  CUDA toolkit + cmake + ninja; only the `llama-server` target builds into
+  `third_party/llama.cpp/build/bin/` (git-ignored; `live` finds it there
+  without flags). Drop the fine-tuned GGUF in `models/` (git-ignored;
+  `--fg-gguf` / `FG_GGUF` override). Never commit weights, sources, or logs.
 - Never start heavy GPU processes (model servers, training) while a
   fine-tune is running in WSL — check `nvidia-smi` and running processes first.
 

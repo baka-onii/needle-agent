@@ -503,3 +503,75 @@ def test_streaming_module_is_packaged_and_served_with_preview_headers(web):
     _, base, _ = web
     status, text = request(base, "/stream.js", raw=True)
     assert status == 200 and "PacedText" in text
+
+
+def test_run_tracks_context_chars_in_snapshot(web):
+    service, base, _ = web
+    token, conversation = setup_conversation(base)
+    run = start(base, token, conversation, "Calculate 6*7")
+    events = finish(base, token, run["id"])
+    starts = [
+        event
+        for event in events
+        if event["type"] == "model_start" and event.get("component") == "reasoning"
+    ]
+    assert starts and all(event["context_chars"] > 0 for event in starts)
+    _, snapshot = request(base, f"/api/runs/{run['id']}", token=token)
+    assert snapshot["context_chars"] == starts[-1]["context_chars"] > 0
+
+
+def test_approval_answer_event_carries_tool_name(web):
+    import threading
+
+    from agent_runtime.server import Answer, Run
+    from agent_runtime.tools.base import ToolCall
+
+    service, _, _ = web
+    run = Run(id="r", conversation_id="c", mode="demo")
+    call = ToolCall(name="run_python", arguments={"code": "print(1)"})
+    outcome = {}
+    worker = threading.Thread(
+        target=lambda: outcome.setdefault(
+            "reply", run.wait_for_user("approval", "Allow Python run?", call)
+        )
+    )
+    worker.start()
+    assert run.condition.wait_for(lambda: run.pending is not None, timeout=5)
+    service.answer(run, Answer(question_id=run.pending["question_id"], approved=True))
+    worker.join(timeout=5)
+    assert outcome["reply"] is True
+    answers = [event for event in run.events if event["type"] == "user_answer"]
+    assert len(answers) == 1
+    assert answers[0]["kind"] == "approval" and answers[0]["tool"] == "run_python"
+
+
+def test_auto_approve_is_session_only_and_validated(web):
+    service, base, _ = web
+    assert "run_python" in service.config.require_approval_for
+    token, _ = setup_conversation(base)
+    _, original = request(base, "/api/session", token=token)
+    status, body = request(
+        base,
+        "/api/settings",
+        method="POST",
+        token=token,
+        data={**original["settings"], "auto_approve": ["run_python", "bogus_tool"]},
+    )
+    assert status == 400 and "bogus_tool" in body["error"]
+    status, result = request(
+        base,
+        "/api/settings",
+        method="POST",
+        token=token,
+        data={**original["settings"], "auto_approve": ["run_python", "git_commit"]},
+    )
+    assert status == 200
+    assert result["settings"]["auto_approve"] == ["run_python", "git_commit"]
+    config = service.run_config(service.sessions[token].settings)
+    assert "run_python" not in config.require_approval_for
+    assert "git_commit" not in config.require_approval_for
+    assert "delete_file" in config.require_approval_for
+    _, exported = request(base, "/api/settings/export", token=token)
+    assert "auto_approve" not in exported["content"]
+    _, fresh = request(base, "/api/session")
+    assert fresh["settings"]["auto_approve"] == []

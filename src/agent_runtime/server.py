@@ -80,6 +80,7 @@ class Settings(BaseModel):
     )
     read_only: bool = _DEFAULT_CONFIG.read_only
     allow_create_parent_dirs: bool = _DEFAULT_CONFIG.allow_create_parent_dirs
+    auto_approve: list[str] = Field(default_factory=list, max_length=64)
     include_workspace_listing: bool = _DEFAULT_CONFIG.include_workspace_listing
     max_directory_entries: int = Field(default=_DEFAULT_CONFIG.max_directory_entries, ge=1, le=2000)
     workspace_listing_chars: int = Field(
@@ -132,6 +133,9 @@ _SETTING_FIELDS = {
     name: {"base_url": "llm_base_url", "model": "llm_model"}.get(name, name)
     for name in Settings.model_fields
 }
+# Session-only quick permissions: never mapped onto AgentConfig, so they are
+# not exported, imported, or persisted to files. run_config() applies them.
+_SETTING_FIELDS.pop("auto_approve")
 
 
 def settings_from_config(config: AgentConfig) -> Settings:
@@ -181,6 +185,7 @@ class Run:
     model_trace_bytes: int = 0
     model_trace_events: int = 0
     trace_limited: bool = False
+    context_chars: int = 0
 
     def push(self, event: dict) -> None:
         with self.condition:
@@ -215,6 +220,8 @@ class Run:
             self.events.append(event)
             if event["type"] == "tool_result":
                 self.steps = event["step"]
+            if event.get("context_chars") is not None:
+                self.context_chars = int(event["context_chars"])
             self.elapsed_ms = event["elapsed_ms"]
             self.condition.notify_all()
 
@@ -265,6 +272,7 @@ class Run:
                 "steps": self.steps,
                 "elapsed_ms": self.elapsed_ms,
                 "trace_limited": self.trace_limited,
+                "context_chars": self.context_chars,
             }
             if include_events:
                 data["events"] = list(self.events)
@@ -347,6 +355,15 @@ class WorkspaceService:
                 )
         values = {field: getattr(settings, name) for name, field in _SETTING_FIELDS.items()}
         values["read_only"] = self.config.read_only or settings.read_only
+        if settings.auto_approve:
+            known = {tool.name for tool in create_default_registry(self.config).list()}
+            unknown = sorted(set(settings.auto_approve) - known)
+            if unknown:
+                raise WebError(400, f"Unknown tools in auto_approve: {', '.join(unknown)}.")
+            approved = set(settings.auto_approve)
+            values["require_approval_for"] = tuple(
+                name for name in self.config.require_approval_for if name not in approved
+            )
         config = replace(self.config, **values)
         # Reject unusable prompts/budgets when saving, not at the next model call.
         ContextManager(config, build_system_prompt(create_default_registry(config).list(), config))
@@ -554,6 +571,7 @@ class WorkspaceService:
                     "question_id": answer.question_id,
                     "answer": run.reply,
                     "kind": pending["kind"],
+                    "tool": (pending.get("call") or {}).get("name"),
                 }
             )
             run.condition.notify_all()

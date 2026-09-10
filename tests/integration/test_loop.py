@@ -372,3 +372,48 @@ def test_severe_tool_executes_when_approved(workspace: Path) -> None:
     state = agent.run("run code")
     assert state["step_count"] == 1
     assert len(approvals) == 1
+
+
+def test_reasoning_model_start_reports_context_chars(workspace: Path) -> None:
+    reasoning = ScriptedReasoning(["<final>Done.</final>"])
+    events = list(_agent(workspace, reasoning, StubAction({})).stream("hello"))
+    starts = [
+        event
+        for event in events
+        if event.get("type") == "model_start" and event.get("component") == "reasoning"
+    ]
+    assert starts
+    assert all(event["context_chars"] > 0 for event in starts)
+
+
+def test_translator_placeholder_never_executes(workspace: Path) -> None:
+    placeholder = NeedleResult(
+        selected_tool="run_python",
+        arguments={"code": "__PAYLOAD_CODE__"},
+        confidence=1.0,
+    )
+    # With a real block the payload wins and the tool runs.
+    reasoning = ScriptedReasoning(
+        [
+            "<tool>Use run_python to run this. <content>print('BLOCK_WINS')</content></tool>",
+            "<final>Done.</final>",
+        ]
+    )
+    events = list(
+        _agent(workspace, reasoning, StubAction({"run_python": placeholder}),
+               approve_fn=lambda call: True).stream("block wins")
+    )
+    starts = [e for e in events if e.get("type") == "tool_start"]
+    assert [e["arguments"] for e in starts] == [{"code": "print('BLOCK_WINS')"}]
+    # Without a block the placeholder fails closed: retry, zero executions.
+    reasoning = ScriptedReasoning(["<tool>Use run_python to run this.</tool>"] * 4)
+    events = list(
+        _agent(workspace, reasoning, StubAction({"run_python": placeholder}),
+               approve_fn=lambda call: True).stream("no block")
+    )
+    assert not [e for e in events if e.get("type") == "tool_start"]
+    assert any(
+        e.get("type") == "rejected" and "__PAYLOAD" not in e.get("message", "")
+        and "content" in e.get("message", "")
+        for e in events
+    )

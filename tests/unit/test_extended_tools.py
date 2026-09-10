@@ -14,7 +14,7 @@ from agent_runtime.models.functiongemma import _coerce_arguments
 from agent_runtime.tools.base import ToolError
 from agent_runtime.tools.editing import apply_unified_diff
 from agent_runtime.tools.registry import FORBIDDEN_TOOLS, create_default_registry
-from agent_runtime.tools.web import html_to_text, parse_duckduckgo
+from agent_runtime.tools.web import html_to_text, parse_duckduckgo, search_blocked
 
 REQUIRED = [
     "read_file", "read_directory", "search_files", "write_file", "file_info",
@@ -154,6 +154,17 @@ def test_web_helpers_without_network() -> None:
     assert parse_duckduckgo(ddg, 5) == [
         ("https://example.com/a", "Alpha", "First snippet here.")
     ]
+
+
+def test_search_blocked_only_matches_bot_walls() -> None:
+    challenge = (
+        "<html><body>Unfortunately, bots use DuckDuckGo too. "
+        "Please complete the following challenge to confirm "
+        "this search was made by a human.</body></html>"
+    )
+    assert search_blocked(challenge)
+    assert not search_blocked("<html><body>No results.</body></html>")
+    assert not search_blocked("Anubis, god of funerary rites, guarded graves.")
 
 
 class _WebHandler(BaseHTTPRequestHandler):

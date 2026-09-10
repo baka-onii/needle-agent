@@ -11,10 +11,31 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from agent_runtime import Agent, AgentConfig, ToolCall
 from agent_runtime.config import export_config, init_config, load_config, read_prompt
 from agent_runtime.tools.base import approval_summary, truncate_text
+
+_REPO_ROOT = Path(
+    os.environ.get("NEEDLE_REPO_ROOT", Path(__file__).resolve().parent.parent.parent)
+)
+
+
+def _repo_llama_server() -> str | None:
+    """Repo-local binary built by scripts/build-llama-server.bat (.sh)."""
+    name = "llama-server.exe" if os.name == "nt" else "llama-server"
+    candidate = _REPO_ROOT / "third_party" / "llama.cpp" / "build" / "bin" / name
+    return str(candidate) if candidate.is_file() else None
+
+
+def _repo_gguf() -> str | None:
+    """First GGUF in the repo models/ directory (weights are never committed)."""
+    models = _REPO_ROOT / "models"
+    if not models.is_dir():
+        return None
+    found = sorted(models.glob("*.gguf"))
+    return str(found[0]) if found else None
 
 
 def _add_config_arguments(parser: argparse.ArgumentParser) -> None:
@@ -255,13 +276,22 @@ def _resolve_translator_server(args: argparse.Namespace) -> tuple[str, subproces
         raise ValueError(
             f"No translator server at {base_url} and --no-server-start was given."
         )
-    gguf = args.fg_gguf or os.environ.get("FG_GGUF")
+    gguf = args.fg_gguf or os.environ.get("FG_GGUF") or _repo_gguf()
     if gguf is None:
         raise ValueError(
-            "No translator model found. Pass --fg-gguf PATH (your fine-tuned GGUF) "
-            "or set FG_GGUF."
+            "No translator model found. Pass --fg-gguf PATH, set FG_GGUF, "
+            "or place the fine-tuned GGUF in the repo models/ directory."
         )
-    binary = args.llama_server or os.environ.get("LLAMA_SERVER")
+    if not os.path.isfile(gguf):
+        hint = ""
+        if _REPO_ROOT.joinpath("models").is_dir():
+            available = sorted(
+                path.name for path in _REPO_ROOT.joinpath("models").glob("*.gguf")
+            )
+            if available:
+                hint = f" Available in models/: {', '.join(available)}."
+        raise ValueError(f"Translator model not found: {gguf}.{hint}")
+    binary = args.llama_server or os.environ.get("LLAMA_SERVER") or _repo_llama_server()
     if binary is None:
         fallback = r"E:\llama.cpp\llama-server.exe"
         try:

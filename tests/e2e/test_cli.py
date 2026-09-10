@@ -63,6 +63,7 @@ def test_live_refuses_without_server_when_start_disabled(tmp_path):
 
 def test_live_requires_a_model_path(tmp_path, monkeypatch):
     monkeypatch.delenv("FG_GGUF", raising=False)
+    monkeypatch.setenv("NEEDLE_REPO_ROOT", str(tmp_path))
     result = subprocess.run(
         [
             sys.executable,
@@ -80,6 +81,17 @@ def test_live_requires_a_model_path(tmp_path, monkeypatch):
     )
     assert result.returncode == 1
     assert "--fg-gguf" in result.stderr
+
+
+def test_live_finds_repo_server_and_model():
+    import pytest
+
+    from agent_runtime import cli
+
+    server, gguf = cli._repo_llama_server(), cli._repo_gguf()
+    if not server or not gguf:
+        pytest.skip("translator binary/weights not built here")
+    assert server.endswith("llama-server.exe") and gguf.endswith(".gguf")
 
 
 def test_invalid_workspace_has_friendly_error():

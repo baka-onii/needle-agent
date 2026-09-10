@@ -171,18 +171,19 @@
             class="nav-item active"
             data-view="playground"
             aria-current="page"
+            title="Playground"
           >
             <svg class="icon"><use href="#i-chat" /></svg><span>Playground</span
             ><span class="nav-active-dot"></span>
           </button>
-          <button class="nav-item" data-view="workspace">
+          <button class="nav-item" data-view="workspace" title="Files">
             <svg class="icon"><use href="#i-folder" /></svg><span>Files</span>
           </button>
-          <button class="nav-item" data-view="tools">
+          <button class="nav-item" data-view="tools" title="Tools">
             <svg class="icon"><use href="#i-grid" /></svg><span>Tools</span
             ><span class="nav-count">7</span>
           </button>
-          <button class="nav-item" data-view="history">
+          <button class="nav-item" data-view="history" title="Run history">
             <svg class="icon"><use href="#i-history" /></svg
             ><span>Run history</span>
           </button>
@@ -206,7 +207,7 @@
               <p>Local-first. Always in your control.</p>
             </div>
           </div>
-          <button class="sidebar-settings" id="open-settings">
+          <button class="sidebar-settings" id="open-settings" title="Settings">
             <svg class="icon"><use href="#i-settings" /></svg
             ><span>Settings</span
             ><svg class="icon tiny"><use href="#i-chevron" /></svg>
@@ -224,6 +225,22 @@
         </div>
       </aside>
       <div class="sidebar-scrim" id="sidebar-scrim"></div>
+      <div
+        class="splitter splitter-left"
+        id="splitter-left"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize navigation panel"
+        tabindex="0"
+      >
+        <button
+          class="splitter-toggle"
+          id="sidebar-collapse"
+          aria-label="Collapse navigation panel"
+        >
+          <svg class="icon"><use href="#i-chevron" /></svg>
+        </button>
+      </div>
       <main class="main-shell">
         <header class="topbar">
           <button
@@ -373,6 +390,11 @@
               ></div>
             </div>
             <div class="composer-area">
+              <div
+                class="context-meter"
+                id="context-meter"
+                title="Characters in the latest model context vs the configured budget"
+              ></div>
               <div class="demo-notice" id="demo-notice">
                 <svg class="icon tiny"><use href="#i-info" /></svg
                 ><span
@@ -406,6 +428,39 @@
                       ><span>Offline demo</span
                       ><svg class="icon tiny"><use href="#i-down" /></svg>
                     </button>
+                    <span class="composer-separator"></span
+                    ><button
+                      type="button"
+                      class="permission-chip"
+                      id="permission-chip"
+                      aria-haspopup="true"
+                      aria-expanded="false"
+                    >
+                      <svg class="icon tiny"><use href="#i-shield" /></svg
+                      ><span>Permissions</span><i class="permission-dot hidden" id="permission-dot"></i>
+                    </button>
+                    <div class="permission-popover hidden" id="permission-popover" role="menu">
+                      <p class="permission-title">AUTO-APPROVE FOR THIS SESSION</p>
+                      <label class="permission-option"
+                        ><input type="checkbox" data-preset="commands" /><span
+                          ><strong>Run commands</strong
+                          ><small>run_process · run_powershell</small></span
+                        ></label
+                      ><label class="permission-option"
+                        ><input type="checkbox" data-preset="python" /><span
+                          ><strong>Run Python</strong
+                          ><small>run_python</small></span
+                        ></label
+                      ><label class="permission-option"
+                        ><input type="checkbox" data-preset="git" /><span
+                          ><strong>Run git commands</strong
+                          ><small>git_commit · git_checkout</small></span
+                        ></label
+                      >
+                      <p class="permission-hint">
+                        Session only — resets on reload. Stop the active run to change.
+                      </p>
+                    </div>
                   </div>
                   <div class="send-area">
                     <span class="send-hint" id="send-hint">Enter ↵</span
@@ -436,6 +491,14 @@
               </div>
             </div>
           </div>
+          <div
+            class="splitter splitter-right"
+            id="splitter-right"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize inspector panel"
+            tabindex="0"
+          ></div>
           <aside class="inspector" id="inspector">
             <div class="inspector-header">
               <span>UNDER THE HOOD</span
@@ -887,6 +950,36 @@
               placeholder="System timezone, or Asia/Kolkata"
               maxlength="100"
             />
+          </details>
+          <details class="settings-section appearance-settings">
+            <summary>Appearance</summary>
+            <p class="field-help">
+              Stored in this browser only. The base color tints the workspace
+              background, sidebar, top bar, cards, inputs, and dialogs; the
+              accent color highlights actions and selections. Small status
+              tints keep their designed colors.
+            </p>
+            <div class="appearance-grid">
+              <label
+                >Interface color<input
+                  type="color"
+                  id="ui-base-color"
+                  value="#f8f9f6"
+              /></label>
+              <label
+                >Accent color<input
+                  type="color"
+                  id="ui-accent-color"
+                  value="#d36b48"
+              /></label>
+            </div>
+            <button
+              type="button"
+              class="button secondary small"
+              id="reset-appearance"
+            >
+              Restore default colors
+            </button>
           </details>
           <details class="settings-section streaming-settings">
             <summary>Streaming & model conversation</summary>

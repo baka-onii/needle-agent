@@ -19,6 +19,32 @@ const toolIcons = {
   read_directory: "folder",
   search_files: "search",
   write_file: "tools",
+  file_info: "info",
+  create_directory: "folder",
+  move_file: "file",
+  copy_file: "copy",
+  delete_file: "trash",
+  replace_text: "tools",
+  insert_text: "tools",
+  delete_text: "tools",
+  apply_patch: "tools",
+  run_python: "code",
+  run_process: "code",
+  run_powershell: "code",
+  git_status: "history",
+  git_diff: "history",
+  git_log: "history",
+  git_show: "history",
+  git_branch_list: "history",
+  git_stage: "history",
+  git_commit: "history",
+  git_checkout: "history",
+  web_search: "search",
+  web_open: "external",
+  web_extract: "file",
+  get_working_directory: "folder",
+  find_executable: "search",
+  process_info: "chip",
   calculator: "calculator",
   get_time: "clock",
   ask_user: "chat",
@@ -28,10 +54,84 @@ const toolNames = {
   read_directory: "Read directory",
   search_files: "Search files",
   write_file: "Write file",
+  file_info: "File info",
+  create_directory: "Create directory",
+  move_file: "Move file",
+  copy_file: "Copy file",
+  delete_file: "Delete file",
+  replace_text: "Replace text",
+  insert_text: "Insert text",
+  delete_text: "Delete text",
+  apply_patch: "Apply patch",
+  run_python: "Python run",
+  run_process: "Command run",
+  run_powershell: "PowerShell run",
+  git_status: "Git status",
+  git_diff: "Git diff",
+  git_log: "Git log",
+  git_show: "Git show",
+  git_branch_list: "Git branches",
+  git_stage: "Git stage",
+  git_commit: "Git commit",
+  git_checkout: "Git checkout",
+  web_search: "Web search",
+  web_open: "Web open",
+  web_extract: "Web extract",
+  get_working_directory: "Working directory",
+  find_executable: "Find executable",
+  process_info: "Process info",
   calculator: "Calculator",
   get_time: "Current time",
   ask_user: "Ask user",
 };
+const toolLabel = (name) =>
+  (toolNames[name] || name || "action").toLowerCase();
+const PERMISSION_PRESETS = {
+  commands: { label: "Run commands", tools: ["run_process", "run_powershell"] },
+  python: { label: "Run Python", tools: ["run_python"] },
+  git: { label: "Git commands", tools: ["git_commit", "git_checkout"] },
+};
+function autoApproved() {
+  return new Set(S.settings?.auto_approve || []);
+}
+function renderPermissions() {
+  const approved = autoApproved();
+  const busy = Boolean(activeRun());
+  $$("#permission-popover input[data-preset]").forEach((input) => {
+    const tools = PERMISSION_PRESETS[input.dataset.preset].tools;
+    const on = tools.filter((tool) => approved.has(tool)).length;
+    input.checked = on === tools.length;
+    input.indeterminate = on > 0 && on < tools.length;
+    input.disabled = busy;
+  });
+  $("#permission-dot").classList.toggle("hidden", approved.size === 0);
+  $("#permission-chip").title = approved.size
+    ? `Auto-approved this session: ${[...approved].join(", ")}`
+    : "No session auto-approvals. Severe actions ask first.";
+}
+async function saveAutoApprove(preset, enabled) {
+  const { label, tools } = PERMISSION_PRESETS[preset];
+  const approved = autoApproved();
+  for (const tool of tools)
+    if (enabled) approved.add(tool);
+    else approved.delete(tool);
+  try {
+    const result = await api("/api/settings", {
+      method: "POST",
+      body: { ...S.settings, auto_approve: [...approved] },
+    });
+    S.settings = result.settings;
+    renderSettings();
+    toast(
+      enabled
+        ? `${label} auto-approved for this session.`
+        : `${label} will ask for approval again.`,
+    );
+  } catch (error) {
+    toast(error.message, true);
+  }
+  renderPermissions();
+}
 const phases = [
   "reason",
   "parse",
@@ -338,9 +438,12 @@ function renderSettings() {
   $("#step-limit").textContent = `${S.settings.max_tool_steps} steps`;
   $("#write-policy").textContent = S.settings.read_only
     ? "Writes disabled"
-    : "Required";
+    : (S.settings.auto_approve || []).length
+      ? `Auto: ${(S.settings.auto_approve || []).slice(0, 3).join(", ")}${(S.settings.auto_approve || []).length > 3 ? ` +${(S.settings.auto_approve || []).length - 3}` : ""}`
+      : "Required";
   $("#workspace-name").textContent = S.workspace?.name || "workspace";
   $("#workspace-chip").title = S.workspace?.path || "";
+  renderPermissions();
   $("#tool-list").innerHTML = S.tools
     .map(
       (tool) =>
@@ -362,6 +465,22 @@ function renderSidebar() {
         )
         .join("")
     : '<div class="recent-empty">A fresh start.<br>Your conversations will appear here.</div>';
+}
+function formatChars(value) {
+  return value >= 1000
+    ? `${(value / 1000).toFixed(1)}k`
+    : `${value}`;
+}
+function updateContextMeter() {
+  const node = $("#context-meter");
+  if (!node) return;
+  const total = S.settings?.max_context_chars || 0;
+  const used = currentRun()?.context_chars || 0;
+  node.textContent = total
+    ? `${formatChars(used)} / ${formatChars(total)} context`
+    : "";
+  node.classList.toggle("warn", total > 0 && used / total >= 0.8 && used / total < 0.95);
+  node.classList.toggle("critical", total > 0 && used / total >= 0.95);
 }
 function updateComposer() {
   const run = currentRun(),
@@ -387,6 +506,7 @@ function updateComposer() {
   $$("[data-prompt]").forEach((button) => {
     button.disabled = !S.ready || S.starting || Boolean(busy);
   });
+  updateContextMeter();
   setRuntimeStatus();
 }
 function selectInspector(tab) {
@@ -408,6 +528,8 @@ function modelsFor(run) {
 function reduceModelEvent(run, event, replay = false) {
   run.models ||= new Map();
   const now = performance.now();
+  if (event.context_chars !== undefined && event.context_chars !== null)
+    run.context_chars = event.context_chars;
   if (event.type === "model_start") {
     run.models.set(event.model_id, {
       ...event,
@@ -509,6 +631,8 @@ function actionGroups(run) {
     if (event.type === "tool_result") group.result = event;
     if (event.type === "rejected") group.rejected = event;
     if (event.type === "confirmation") group.review = event;
+    if (event.type === "user_answer" && event.kind === "approval")
+      group.decision = event;
   }
   run.groupCache = groups;
   run.groupVersion = run.toolVersion || 0;
@@ -663,7 +787,15 @@ function renderToolCard(group, run) {
     (model) =>
       model.component === "translator" && model.parent_id === group.modelId,
   );
-  return `<details class="tool-card" data-event-key="${esc(key)}"><summary>${icon(toolIcons[name] || "spark")}<span class="tool-card-title">${esc(toolNames[name] || "Action requested")}</span><span class="tool-card-status${failed ? " error" : ""}">${esc(label)}</span>${icon("chevron")}</summary><div class="tool-card-body"><p>${esc(group.action)}</p>${args ? `<div class="tool-detail-label">${group.validated ? "Validated arguments" : "Proposed arguments"}${group.rejected ? " · not executed" : ""}</div><pre>${esc(JSON.stringify(args, null, 2))}</pre>` : ""}${group.result ? `<div class="tool-detail-label">${group.result.success ? "Tool observation" : "Tool error"}</div><pre>${esc(group.result.success ? group.result.output : group.result.error)}</pre>` : ""}${group.rejected ? `<div class="tool-detail-label">Blocked at ${esc(group.rejected.stage)}</div><pre>${esc(group.rejected.message)}</pre>` : ""}${renderSelectionReview(group.review)}${translator ? renderModelCard(translator, run) : ""}${score !== undefined ? `<div class="confidence-line">${run.mode === "demo" ? "Synthetic demo score" : "Needle confidence"}: ${Number(score).toFixed(2)}${group.confidence ? ` · gate ≥ ${Number(group.confidence.threshold).toFixed(2)}` : ""}</div>` : ""}</div></details>`;
+  return `<details class="tool-card" data-event-key="${esc(key)}"><summary>${icon(toolIcons[name] || "spark")}<span class="tool-card-title">${esc(toolNames[name] || "Action requested")}</span><span class="tool-card-status${failed ? " error" : ""}">${esc(label)}</span>${icon("chevron")}</summary><div class="tool-card-body"><p>${esc(group.action)}</p>${args ? `<div class="tool-detail-label">${group.validated ? "Validated arguments" : "Proposed arguments"}${group.rejected ? " · not executed" : ""}</div><pre>${esc(JSON.stringify(args, null, 2))}</pre>` : ""}${group.result ? `<div class="tool-detail-label">${group.result.success ? "Tool observation" : "Tool error"}</div><pre>${esc(group.result.success ? group.result.output : group.result.error)}</pre>` : ""}${group.rejected ? `<div class="tool-detail-label">Blocked at ${esc(group.rejected.stage)}</div><pre>${esc(group.rejected.message)}</pre>` : ""}${renderDecision(group.decision)}${renderSelectionReview(group.review)}${translator ? renderModelCard(translator, run) : ""}${score !== undefined ? `<div class="confidence-line">${run.mode === "demo" ? "Synthetic demo score" : "Needle confidence"}: ${Number(score).toFixed(2)}${group.confidence ? ` · gate ≥ ${Number(group.confidence.threshold).toFixed(2)}` : ""}</div>` : ""}</div></details>`;
+}
+function renderDecision(decision) {
+  if (!decision) return "";
+  const approved = Boolean(decision.answer);
+  const label = decision.tool
+    ? toolLabel(decision.tool)
+    : "action";
+  return `<div class="tool-decision ${approved ? "approved" : "declined"}">${icon(approved ? "check" : "close", true)}<span>You ${approved ? "approved" : "declined"} the ${esc(label)}.</span></div>`;
 }
 function approvalPreview(call) {
   if (!call || !call.arguments) return "(no details)";
@@ -690,13 +822,18 @@ function renderAssistant(message) {
   const answers = (run.events || []).filter(
     (event) => event.type === "user_answer",
   );
+  // Approval outcomes now live inside their own tool card; only question
+  // answers and legacy approvals (recorded without a tool name) stay here.
+  const looseAnswers = answers.filter(
+    (event) => event.kind !== "approval" || !event.tool,
+  );
   const pending = renderPending(run);
   const preview = answerPreview(run, message);
   const working =
     !run.done && !run.pending && !preview.text
       ? `<div class="working" data-render-key="working"><span class="spinner"></span><span>${S.streamError && S.streamRun === run.id ? "Connection interrupted. Reconnecting…" : run.status === "CANCELLING" ? "Stopping the current model stream…" : `${esc(phaseNames[run.phase] || "Starting the agent")}…`}</span></div>`
       : "";
-  return `<article class="message assistant" data-render-key="assistant-${esc(run.id)}" data-message-run="${esc(run.id)}"><div class="assistant-label"><span class="assistant-mark">${icon("needle")}</span>Needle<span class="label-mode">${run.mode === "demo" ? "DEMO" : "LIVE"}</span></div><div class="assistant-body">${timeline ? `<div class="tool-stack model-timeline" data-render-key="timeline">${timeline}</div>` : ""}${answers.map((event) => `<div class="answered-note" data-render-key="answer-${event.id}">${event.kind === "approval" ? `You ${event.answer ? "approved" : "declined"} the write.` : `You: ${esc(event.answer)}`}</div>`).join("")}${pending}${working}${run.trace_limited ? '<p class="model-note trace-warning" data-render-key="trace-warning">Model trace limit reached. Further model text is omitted; tool results and the final answer are still retained.</p>' : ""}${preview.partial ? `<div class="partial-response" data-render-key="partial"><p class="model-note">Partial response · generation did not complete</p><div class="markdown">${markdown(preview.partial)}</div></div>` : ""}${preview.text || preview.streaming ? `<div class="markdown${preview.streaming ? " streaming-answer" : ""}" data-render-key="answer-output" aria-busy="${preview.streaming}">${markdown(preview.text, preview.streaming)}</div>` : ""}${run.done ? `<div class="message-meta" data-render-key="meta">${statusBadge(run.status)}<span>${run.steps} tool ${run.steps === 1 ? "step" : "steps"}</span><span>·</span><span>${duration(run.elapsed_ms)}</span><span class="meta-spacer"></span><button class="icon-button inspect-run" data-run="${esc(run.id)}" aria-label="Inspect run">${icon("history")}</button><button class="icon-button copy-answer" data-run="${esc(run.id)}" aria-label="Copy answer">${icon("copy")}</button></div>` : ""}</div></article>`;
+  return `<article class="message assistant" data-render-key="assistant-${esc(run.id)}" data-message-run="${esc(run.id)}"><div class="assistant-label"><span class="assistant-mark">${icon("needle")}</span>Needle<span class="label-mode">${run.mode === "demo" ? "DEMO" : "LIVE"}</span></div><div class="assistant-body">${timeline ? `<div class="tool-stack model-timeline" data-render-key="timeline">${timeline}</div>` : ""}${looseAnswers.map((event) => `<div class="answered-note" data-render-key="answer-${event.id}">${event.kind === "approval" ? `You ${event.answer ? "approved" : "declined"} an action.` : `You: ${esc(event.answer)}`}</div>`).join("")}${pending}${working}${run.trace_limited ? '<p class="model-note trace-warning" data-render-key="trace-warning">Model trace limit reached. Further model text is omitted; tool results and the final answer are still retained.</p>' : ""}${preview.partial ? `<div class="partial-response" data-render-key="partial"><p class="model-note">Partial response · generation did not complete</p><div class="markdown">${markdown(preview.partial)}</div></div>` : ""}${preview.text || preview.streaming ? `<div class="markdown${preview.streaming ? " streaming-answer" : ""}" data-render-key="answer-output" aria-busy="${preview.streaming}">${markdown(preview.text, preview.streaming)}</div>` : ""}${run.done ? `<div class="message-meta" data-render-key="meta">${statusBadge(run.status)}<span>${run.steps} tool ${run.steps === 1 ? "step" : "steps"}</span><span>·</span><span>${duration(run.elapsed_ms)}</span><span class="meta-spacer"></span><button class="icon-button inspect-run" data-run="${esc(run.id)}" aria-label="Inspect run">${icon("history")}</button><button class="icon-button copy-answer" data-run="${esc(run.id)}" aria-label="Copy answer">${icon("copy")}</button></div>` : ""}</div></article>`;
 }
 function preserveScroll(render, force = false) {
   const scroll = $("#chat-scroll");
@@ -876,6 +1013,7 @@ function applyEvent(run, event) {
       "tool_result",
       "rejected",
       "confirmation",
+      "user_answer",
     ].includes(event.type)
   )
     run.toolVersion = (run.toolVersion || 0) + 1;
@@ -1566,15 +1704,243 @@ $("#config-file").addEventListener("change", (event) =>
 );
 $("#reset-prompts").addEventListener("click", resetPrompts);
 $("#stop-run").addEventListener("click", stopRun);
-$("#menu-button").addEventListener("click", () =>
-  $("#sidebar").classList.toggle("open"),
-);
+function applyPanelState() {
+  const root = document.documentElement.style;
+  const sidebarWidth = Number(stored("needle-sidebar-w"));
+  if (sidebarWidth >= 140 && sidebarWidth <= 320)
+    root.setProperty("--sidebar", `${sidebarWidth}px`);
+  const inspectorWidth = Number(stored("needle-inspector-w"));
+  if (inspectorWidth >= 220 && inspectorWidth <= 480)
+    root.setProperty("--inspector", `${inspectorWidth}px`);
+  document.body.classList.toggle(
+    "sidebar-hidden",
+    stored("needle-sidebar-hidden") === "1",
+  );
+  document.body.classList.toggle(
+    "inspector-hidden",
+    stored("needle-inspector-hidden") === "1",
+  );
+  syncSidebarCompact();
+  syncCollapseIcon();
+  applyCustomColors();
+}
+const DEFAULT_UI_COLORS = { base: "#f8f9f6", accent: "#d36b48" };
+function applyCustomColors() {
+  const root = document.documentElement.style;
+  const base = stored("needle-ui-base"),
+    accent = stored("needle-ui-accent");
+  if (base) {
+    root.setProperty("--paper", base);
+    // Cards, inputs, and dialogs follow the base in both themes. Dark
+    // bases lift subtly toward white (dark elevation); light bases mix
+    // further toward white. The mixes reproduce the default light palette
+    // when the default base is picked, so there is no jump there.
+    // A blind white mix would turn dark bases into washed-out gray.
+    const dark = (baseLuminance(base) ?? 1) < 0.35;
+    const mix = dark ? [88, 78, 68] : [30, 45, 60];
+    root.setProperty("--surface", `color-mix(in srgb, ${base} ${mix[0]}%, white)`);
+    root.setProperty(
+      "--surface-soft",
+      `color-mix(in srgb, ${base} ${mix[1]}%, white)`,
+    );
+    root.setProperty(
+      "--surface-hover",
+      `color-mix(in srgb, ${base} ${mix[2]}%, white)`,
+    );
+    // Sidebar stays a touch darker than the workspace, topbar a touch
+    // lighter, so the panels keep their visual hierarchy in any color.
+    root.setProperty("--sidebar-bg", `color-mix(in srgb, ${base} 80%, black)`);
+    root.setProperty(
+      "--topbar-custom",
+      `color-mix(in srgb, ${base} 90%, white)`,
+    );
+  } else {
+    for (const name of [
+      "--paper",
+      "--surface",
+      "--surface-soft",
+      "--surface-hover",
+      "--sidebar-bg",
+      "--topbar-custom",
+    ])
+      root.removeProperty(name);
+  }
+  if (accent) {
+    root.setProperty("--accent", accent);
+    root.setProperty("--accent-hover", `color-mix(in srgb, ${accent} 88%, black)`);
+  } else {
+    root.removeProperty("--accent");
+    root.removeProperty("--accent-hover");
+  }
+  const baseInput = $("#ui-base-color"),
+    accentInput = $("#ui-accent-color");
+  if (baseInput) baseInput.value = base || DEFAULT_UI_COLORS.base;
+  if (accentInput) accentInput.value = accent || DEFAULT_UI_COLORS.accent;
+}
+function baseLuminance(hex) {
+  const match = /^#([0-9a-f]{6})$/i.exec(hex || "");
+  if (!match) return null;
+  const [r, g, b] = [0, 2, 4].map((i) =>
+    parseInt(match[1].slice(i, i + 2), 16),
+  );
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+}
+function checkThemeFit() {
+  const luminance = baseLuminance(stored("needle-ui-base"));
+  if (luminance === null) return;
+  const wantsDark = luminance < 0.35;
+  const isDark = document.documentElement.dataset.theme === "dark";
+  // A dark base under light text colors (or vice versa) is unreadable, so
+  // match the theme to the pick. The toggle stays available to override.
+  if (wantsDark !== isDark) {
+    applyTheme(wantsDark ? "dark" : "light");
+    toast(
+      `Switched to the ${wantsDark ? "dark" : "light"} theme to match this base color.`,
+    );
+  }
+}
+function shellRect() {
+  return $(".app-shell").getBoundingClientRect();
+}
+const SIDEBAR_COMPACT_BELOW = 150;
+function sidebarWidth() {
+  return (
+    parseFloat(
+      getComputedStyle(document.documentElement).getPropertyValue("--sidebar"),
+    ) || 167
+  );
+}
+function syncSidebarCompact() {
+  document.body.classList.toggle(
+    "sidebar-compact",
+    window.innerWidth > 760 && sidebarWidth() < SIDEBAR_COMPACT_BELOW,
+  );
+}
+function syncCollapseIcon() {
+  const hidden = document.body.classList.contains("sidebar-hidden");
+  const button = $("#sidebar-collapse");
+  if (button) {
+    button.innerHTML = `<span class="${hidden ? "" : "flip"}">${icon("chevron")}</span>`;
+    button.setAttribute(
+      "aria-label",
+      hidden ? "Show navigation panel" : "Collapse navigation panel",
+    );
+  }
+}
+function setSidebarHidden(hidden) {
+  document.body.classList.toggle("sidebar-hidden", hidden);
+  stored("needle-sidebar-hidden", hidden ? "1" : null);
+  syncCollapseIcon();
+}
+function dragSplitter(node, min, max, apply, persist) {
+  const clamp = (value) => Math.min(max, Math.max(min, Math.round(value)));
+  const set = (value, save) => {
+    const width = clamp(value);
+    document.documentElement.style.setProperty(apply, `${width}px`);
+    if (apply === "--sidebar") syncSidebarCompact();
+    if (save) stored(persist, String(width));
+  };
+  node.addEventListener("pointerdown", (event) => {
+    if (node.id === "splitter-left" && window.innerWidth <= 760) return;
+    if (node.id === "splitter-right" && window.innerWidth <= 1060) return;
+    event.preventDefault();
+    node.classList.add("dragging");
+    node.setPointerCapture(event.pointerId);
+    const rect = shellRect();
+    const move = (e) => {
+      set(
+        node.id === "splitter-left"
+          ? e.clientX - rect.left
+          : rect.right - e.clientX,
+        false,
+      );
+    };
+    const up = (e) => {
+      node.classList.remove("dragging");
+      set(
+        node.id === "splitter-left"
+          ? e.clientX - rect.left
+          : rect.right - e.clientX,
+        true,
+      );
+      node.removeEventListener("pointermove", move);
+      node.removeEventListener("pointerup", up);
+      node.removeEventListener("pointercancel", up);
+    };
+    node.addEventListener("pointermove", move);
+    node.addEventListener("pointerup", up);
+    node.addEventListener("pointercancel", up);
+  });
+  node.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const current = parseFloat(
+      getComputedStyle(document.documentElement).getPropertyValue(apply),
+    );
+    const delta = event.key === "ArrowLeft" ? -12 : 12;
+    set((node.id === "splitter-left" ? current + delta : current - delta), true);
+  });
+}
+$("#menu-button").addEventListener("click", () => {
+  if (window.innerWidth <= 760) $("#sidebar").classList.toggle("open");
+  else
+    setSidebarHidden(!document.body.classList.contains("sidebar-hidden"));
+});
+$("#sidebar-collapse").addEventListener("click", (event) => {
+  event.stopPropagation();
+  setSidebarHidden(!document.body.classList.contains("sidebar-hidden"));
+});
+window.addEventListener("resize", syncSidebarCompact);
 $("#sidebar-scrim").addEventListener("click", () =>
   $("#sidebar").classList.remove("open"),
 );
-$("#inspector-toggle").addEventListener("click", () =>
-  $("#inspector").classList.toggle("visible"),
-);
+$("#inspector-toggle").addEventListener("click", () => {
+  if (window.innerWidth <= 1060) {
+    document.body.classList.remove("inspector-hidden");
+    $("#inspector").classList.toggle("visible");
+  } else {
+    const hidden = document.body.classList.toggle("inspector-hidden");
+    stored("needle-inspector-hidden", hidden ? "1" : null);
+  }
+});
+$("#permission-chip").addEventListener("click", (event) => {
+  event.stopPropagation();
+  const popover = $("#permission-popover");
+  popover.classList.toggle("hidden");
+  $("#permission-chip").setAttribute(
+    "aria-expanded",
+    String(!popover.classList.contains("hidden")),
+  );
+});
+document.addEventListener("click", (event) => {
+  if (
+    !event.target.closest("#permission-popover") &&
+    !event.target.closest("#permission-chip")
+  )
+    $("#permission-popover").classList.add("hidden");
+});
+$("#permission-popover").addEventListener("change", (event) => {
+  const preset = event.target.dataset?.preset;
+  if (preset && PERMISSION_PRESETS[preset])
+    saveAutoApprove(preset, event.target.checked);
+});
+$("#ui-base-color").addEventListener("input", (event) => {
+  stored("needle-ui-base", event.target.value);
+  applyCustomColors();
+});
+$("#ui-base-color").addEventListener("change", checkThemeFit);
+$("#ui-accent-color").addEventListener("input", (event) => {
+  stored("needle-ui-accent", event.target.value);
+  applyCustomColors();
+});
+$("#reset-appearance").addEventListener("click", () => {
+  stored("needle-ui-base", null);
+  stored("needle-ui-accent", null);
+  applyCustomColors();
+  toast("Default colors restored.");
+});
+dragSplitter($("#splitter-left"), 64, 320, "--sidebar", "needle-sidebar-w");
+dragSplitter($("#splitter-right"), 220, 480, "--inspector", "needle-inspector-w");
 $("#setup-tab").addEventListener("click", () => selectInspector("setup"));
 $("#activity-tab").addEventListener("click", () => selectInspector("activity"));
 [
@@ -1668,7 +2034,10 @@ document.addEventListener("click", async (event) => {
     if (target.classList.contains("inspect-run")) {
       S.currentRun = target.dataset.run;
       selectInspector("activity");
-      if (window.innerWidth <= 1060) $("#inspector").classList.add("visible");
+      if (window.innerWidth <= 1060) {
+        document.body.classList.remove("inspector-hidden");
+        $("#inspector").classList.add("visible");
+      }
     }
     if (target.classList.contains("export-trace"))
       await exportRun(target.dataset.run);
@@ -1722,4 +2091,5 @@ async function boot() {
   }
 }
 applyTheme(document.documentElement.dataset.theme || "light", false);
+applyPanelState();
 boot();

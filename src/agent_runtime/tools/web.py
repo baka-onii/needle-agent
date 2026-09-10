@@ -19,6 +19,13 @@ from agent_runtime.tools.base import Tool, ToolError, truncate_text
 _WEB_TIMEOUT_S = 20
 _WEB_MAX_BYTES = 2_000_000
 _USER_AGENT = "needle-agent/0.1 (local research harness)"
+# Markers of provider bot-walls (only consulted when zero results parsed,
+# so ordinary result text mentioning these words can never trip them).
+_CHALLENGE_MARKERS = (
+    "challenge to confirm",  # DuckDuckGo human-check page
+    "anubis could not load",  # Startpage proof-of-work wall
+    "javascript is required to complete this challenge",  # Mojeek captcha
+)
 _RESULT = re.compile(
     r'<a[^>]*class="result__a"[^>]*href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>'
     r".*?(?:result__snippet[^>]*>(?P<snippet>.*?)</(?:a|div|span)>)",
@@ -82,6 +89,12 @@ def parse_duckduckgo(page: str, count: int) -> list[tuple[str, str, str]]:
     return results
 
 
+def search_blocked(page: str) -> bool:
+    """True when a provider bot-wall replaced the result list entirely."""
+    lowered = page.casefold()
+    return any(marker in lowered for marker in _CHALLENGE_MARKERS)
+
+
 def make_web_search_tool(config: AgentConfig) -> Tool:
     def web_search(query: str, count: int = 5) -> str:
         if not query.strip():
@@ -101,6 +114,12 @@ def make_web_search_tool(config: AgentConfig) -> Tool:
             raise ToolError(f"Search failed: {exc}") from exc
         results = parse_duckduckgo(page, count)
         if not results:
+            if search_blocked(page):
+                raise ToolError(
+                    "DuckDuckGo challenged this automated request (bot check), "
+                    "so no results could be read. This usually depends on the "
+                    "network address; retry later or from a different network."
+                )
             return f"No results for {query!r}."
         lines = [f"Top {len(results)} result(s) for {query!r} (untrusted web data):"]
         for url, title, snippet in results:

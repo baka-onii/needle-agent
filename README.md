@@ -76,9 +76,6 @@ In the browser, **Settings → Live models → Test connection** checks `/v1/mod
 and initializes Needle. Save the settings, then send a message. Changing settings
 while a run is active is blocked. Settings and histories are isolated per browser session.
 
-**Remote previews:** `127.0.0.1` means the machine hosting the Python server, *not your
-laptop*. Use a reasoning endpoint that machine can reach. The frontend only calls
-same-origin relative `/api/...` URLs; it never directly connects to a model provider.
 
 ### 2. Let Needle initialize
 
@@ -96,9 +93,6 @@ Custom Needle weights currently return uncalibrated confidence. Missing confiden
 treated as zero rather than invented; default gates therefore prevent execution. Do not
 lower confidence gates just to hide model failures.
 
-**This checkout's development environment could not download Hugging Face model files.**
-The adapters and their HTTP/single-turn contracts are tested with local mock servers;
-the live-model benchmark has not been rerun as part of this implementation.
 
 ## What you can interact with
 
@@ -129,9 +123,29 @@ uv run needle-agent run --demo 'Calculate 2 * (15 + 3)' --json
 uv run needle-agent chat --workspace /path/to/project --base-url http://127.0.0.1:11434/v1 --model qwen2.5:3b --trace
 
 # One command: translator server (fine-tuned GGUF) + live harness
-uv run needle-agent live --workspace /path/to/project --fg-gguf /path/to/fg-tools.gguf
-uv run needle-agent live --workspace /path/to/project --fg-gguf /path/to/fg-tools.gguf --ui  # browser GUI
+uv run needle-agent live --workspace /path/to/project --fg-gguf models/fg-tools.gguf
+uv run needle-agent live --workspace /path/to/project --fg-gguf models/fg-tools.gguf --ui  # browser GUI
 ```
+
+### Fine-tuned translator (FunctionGemma) setup
+
+Fresh clone to working harness, four steps:
+
+```sh
+# 1. Build llama-server with CUDA (Windows: scripts\build-llama-server.bat,
+#    Linux: scripts/build-llama-server.sh). Needs VS Build Tools / gcc,
+#    a CUDA toolkit, cmake, and ninja. Only the llama-server target builds.
+# 2. Place the fine-tuned translator GGUF at models/fg-tools.gguf
+#    (weights are git-ignored; --fg-gguf / FG_GGUF override the default).
+# 3. Start your reasoning server (Ollama / llama.cpp / Ornith on :8080).
+# 4. Run it — the translator server starts automatically on :8081:
+uv run needle-agent live --workspace /path/to/project --ui
+```
+
+`live` resolves everything repo-relative: `third_party/llama.cpp/build/bin/llama-server`
+(preferring `--llama-server` / `LLAMA_SERVER`), and the first `models/*.gguf`.
+It reuses a server already listening on `--fg-port` and only stops servers it
+started itself. Never build or serve while a fine-tune is running on the same GPU.
 
 Terminal commands: `/new` (reset conversation), `/tools`, `/exit`. Both terminal and web
 interfaces ask permission before severe actions (deletion, code execution, text
