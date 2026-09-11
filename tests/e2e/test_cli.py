@@ -94,6 +94,17 @@ def test_live_finds_repo_server_and_model():
     assert server.endswith("llama-server.exe") and gguf.endswith(".gguf")
 
 
+def test_live_help_advertises_cpu_default_and_gpu_flag():
+    result = subprocess.run(
+        [sys.executable, "-m", "agent_runtime", "live", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0
+    assert "--gpu-translator" in result.stdout
+
+
 def test_invalid_workspace_has_friendly_error():
     result = subprocess.run(
         [

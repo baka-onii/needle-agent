@@ -66,6 +66,7 @@ class AgentConfig:
     max_repeated_failures: int = _DEFAULTS["max_repeated_failures"]
     max_tool_output_chars: int = MAX_TOOL_OUTPUT_CHARS
     max_context_chars: int = _DEFAULTS["max_context_chars"]
+    max_context_tokens: int = _DEFAULTS["max_context_tokens"]
 
     # None means cwd, not unrestricted filesystem access.
     workspace_root: str | None = None
@@ -135,6 +136,7 @@ class AgentConfig:
             "max_repeated_failures",
             "max_tool_output_chars",
             "max_context_chars",
+            "max_context_tokens",
             "max_directory_entries",
             "workspace_listing_chars",
             "max_search_results",

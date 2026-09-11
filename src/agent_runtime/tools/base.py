@@ -69,20 +69,33 @@ class Tool:
     payload_args: tuple[str, ...] = ()
 
     def reasoning_description(self) -> str:
-        lines = [f"- {self.name}: {self.description}"]
+        """One compact line per tool: names and types stay exact, prose goes.
+
+        The system prompt re-sends this block every turn, so verbosity here
+        is a per-turn token tax. Argument descriptions live in the canonical
+        schema (translators, validators, UI) rather than in this line.
+        """
         props = self.parameters.get("properties", {})
         required = set(self.parameters.get("required", []))
-        for arg, schema in props.items():
-            opt = "" if arg in required else " (optional)"
-            lines.append(f"    - {arg}{opt}: {schema.get('description', '')}".rstrip())
+
+        def arg_type(schema: dict[str, Any]) -> str:
+            declared = schema.get("type", "string")
+            types = declared if isinstance(declared, list) else [declared]
+            return "/".join(str(t) for t in types)
+
+        args = ", ".join(
+            f"{name}{'' if name in required else '?'}: {arg_type(schema)}"
+            for name, schema in props.items()
+        )
+        line = f"- {self.name}({args}): {self.description}"
         if len(self.payload_args) == 1:
-            lines.append(f"    - payload: one <content> block fills {self.payload_args[0]!r}")
+            line += f" Payload: <content> fills {self.payload_args[0]!r}."
         elif self.payload_args:
             filled = ", ".join(
                 f"<text-{i}> fills {arg!r}" for i, arg in enumerate(self.payload_args, 1)
             )
-            lines.append(f"    - payloads: {filled}")
-        return "\n".join(lines)
+            line += f" Payloads: {filled}."
+        return line
 
     def needle_schema(self) -> dict[str, Any]:
         return {

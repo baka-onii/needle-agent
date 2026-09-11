@@ -252,3 +252,77 @@ def test_approval_summary_names_tool_and_target(tmp_path: Path) -> None:
         ToolCall(name="run_python", arguments={"code": "print(1)"})
     ).startswith("run_python print(1)")
     assert approval_summary(ToolCall(name="get_time", arguments={})) == "get_time"
+
+
+def test_approval_diff_covers_severe_tools(tmp_path: Path) -> None:
+    from agent_runtime.tools.base import ToolCall
+    from agent_runtime.tools.preview import approval_diff
+
+    config = AgentConfig(workspace_root=str(tmp_path))
+    (tmp_path / "note.txt").write_text("line one\nline two\n")
+
+    diff = approval_diff(
+        ToolCall(name="write_file", arguments={"path": "new.txt", "content": "hi\n"}),
+        config,
+    )
+    assert diff["label"].startswith("New file") and "hi" in diff["text"]
+
+    diff = approval_diff(
+        ToolCall(
+            name="write_file",
+            arguments={"path": "note.txt", "content": "line one\nLINE TWO\n"},
+        ),
+        config,
+    )
+    assert diff["label"] == "Edit note.txt"
+    assert "-line two" in diff["text"] and "+LINE TWO" in diff["text"]
+
+    diff = approval_diff(
+        ToolCall(
+            name="replace_text",
+            arguments={"path": "note.txt", "old_text": "line two", "new_text": "2"},
+        ),
+        config,
+    )
+    assert "near line 2" in diff["text"] and "-line two" in diff["text"]
+
+    diff = approval_diff(
+        ToolCall(
+            name="insert_text",
+            arguments={"path": "note.txt", "line": 1, "text": "middle"},
+        ),
+        config,
+    )
+    assert "after line 1" in diff["text"] and "+middle" in diff["text"]
+
+    diff = approval_diff(
+        ToolCall(
+            name="delete_text",
+            arguments={"path": "note.txt", "start_line": 1, "end_line": 1},
+        ),
+        config,
+    )
+    assert "-line one" in diff["text"]
+
+    diff = approval_diff(
+        ToolCall(name="delete_file", arguments={"path": "note.txt"}), config
+    )
+    assert diff["label"] == "Delete note.txt" and "line one" in diff["text"]
+
+    diff = approval_diff(
+        ToolCall(name="apply_patch", arguments={"path": "n", "patch": "@@ x"}),
+        config,
+    )
+    assert "@@ x" in diff["text"]
+
+    assert (
+        approval_diff(ToolCall(name="run_python", arguments={"code": "x"}), config)
+        is None
+    )
+    assert (
+        approval_diff(
+            ToolCall(name="write_file", arguments={"path": "../evil", "content": "x"}),
+            config,
+        )
+        is None
+    )

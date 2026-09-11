@@ -45,6 +45,13 @@
   needle_result, tool_call, last_tool_result, step_count, model_turn,
   max_tool_steps, stall_count, action_records, final_answer, status`). Never put
   model instances, registries, executors, or config in state.
+- Context is budgeted twice: `max_context_chars` (always) and
+  `max_context_tokens` (when the server tokenizer in `models/tokens.py`
+  resolves; llama.cpp/Ollama backends, heuristic fallback). Past ~80%,
+  `context/summarize.py` replaces history with a validated structured summary
+  (summary + current request); malformed summaries fall back to trim, never install.
+- Multi-step work lives in workspace-root `tasks.md`, maintained by the model
+  via file tools; `workspace_description` notes its presence when it exists.
 - One tool action per reasoning turn. After every successful execution go
   `OBSERVE → UPDATE_CONTEXT → REASON`. Never chain tools without reasoning.
 - No `<tool>` and no `<final>` → treat response as final answer (prevents failures on tag-less models).
@@ -73,7 +80,10 @@
   original request + recent messages, drops old observations first. No summarization models.
 
 ## Structure
-- `src/agent_runtime/{agent.py,cli.py,server.py,config.py,state.py,models/{reasoning,action,needle,functiongemma,demo,streaming}.py,protocol/{parser,stream,intent}.py,tools/{base,registry,filesystem,editing,execution,git,web,environment,utility,interaction}.py,execution/{sanitizer,validator,confidence,executor}.py,context/manager.py,graph/workflow.py,web/}`, `tests/{unit,integration,e2e}/`, `examples/basic.py`, `config/{defaults.toml,prompts/}`.
+- `src/agent_runtime/{agent.py,cli.py,server.py,store.py,config.py,state.py,models/{reasoning,action,needle,functiongemma,demo,streaming,tokens}.py,protocol/{parser,stream,intent}.py,tools/{base,registry,filesystem,editing,execution,git,web,environment,utility,interaction,preview}.py,execution/{sanitizer,validator,confidence,executor}.py,context/{manager,summarize}.py,graph/workflow.py,web/}`, `tests/{unit,integration,e2e}/`, `examples/basic.py`, `config/{defaults.toml,prompts/}`.
+- Browser sessions persist write-through to SQLite (`store.py`, default
+  `~/.needle/sessions.db`, `NEEDLE_SESSIONS_DB` override); per-token model
+  traces are never stored. Storage failures never break runs.
 - Do not split files further without concrete reason. Pydantic for external/model data (`ToolCall, ToolResult, NeedleResult+ToolRanking`); dataclasses for internal runtime objects.
 
 ## Build / test

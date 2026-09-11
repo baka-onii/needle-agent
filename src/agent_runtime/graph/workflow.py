@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from agent_runtime.config import AgentConfig
 from agent_runtime.context.manager import ContextManager
 from agent_runtime.context.manager import total_chars as context_chars
+from agent_runtime.context.summarize import compress_messages, should_compress
 from agent_runtime.execution.confidence import (
     is_confident,
     ranked_candidates,
@@ -65,7 +66,7 @@ class RuntimeDeps:
     contexts: ContextManager
     config: AgentConfig
     cancelled: Callable[[], bool] | None = None
-    approve: Callable[[ToolCall], bool] | None = None
+    approve: Callable[[ToolCall], bool | ToolCall | None] | None = None
 
 
 def build_workflow(deps: RuntimeDeps):
@@ -187,7 +188,20 @@ def build_workflow(deps: RuntimeDeps):
 
     def reason(state: AgentState) -> dict:
         prompt = contexts.build(state["messages"])
+        if len(state["messages"]) > 4 and should_compress(
+            contexts.last_chars,
+            contexts.last_tokens,
+            config.max_context_chars,
+            config.max_context_tokens,
+        ):
+            compressed = compress_messages(
+                reasoning, state["messages"], config, emit
+            )
+            if compressed is not None:
+                state = {**state, "messages": compressed}
+                prompt = contexts.build(state["messages"])
         prompt_chars = context_chars(prompt)
+        prompt_tokens = contexts.last_tokens
         turn = state["model_turn"] + 1
         model_id = f"reason-{turn}"
         stream_method = getattr(reasoning, "stream", None)
@@ -198,6 +212,7 @@ def build_workflow(deps: RuntimeDeps):
             component="reasoning",
             turn=turn,
             context_chars=prompt_chars,
+            context_tokens=prompt_tokens,
             model=getattr(reasoning, "model_name", type(reasoning).__name__),
             streamed=streaming,
             input_messages=[{"role": m["role"], "content": m["content"]} for m in prompt]
@@ -592,15 +607,50 @@ def build_workflow(deps: RuntimeDeps):
                         f"The user already declined this {call.name} action during this run. "
                         "Do not request permission again."
                     )
-                if deps.approve is not None and not deps.approve(call):
-                    return {
-                        **retry(
-                            state,
-                            f"The user declined this {call.name} action. Do not try it again.",
-                            "safety",
-                        ),
-                        "action_records": [*records, record(call, "denied")],
-                    }
+                if deps.approve is not None:
+                    decision = deps.approve(call)
+                    if decision is False or decision is None:
+                        return {
+                            **retry(
+                                state,
+                                f"The user declined this {call.name} action. Do not try it again.",
+                                "safety",
+                            ),
+                            "action_records": [*records, record(call, "denied")],
+                        }
+                    if isinstance(decision, ToolCall):
+                        # Approved with user-edited arguments: the user is the
+                        # intent authority, so intent checks are skipped, but
+                        # schema, paths, and the confidence gate re-apply.
+                        call = validate(decision, registry)
+                        check_safety(call, config)
+                        needle = NeedleResult.model_validate(state["needle_result"])
+                        gate = threshold_for(call.name, config)
+                        emit(
+                            "confidence",
+                            tool=call.name,
+                            score=needle.confidence,
+                            threshold=gate,
+                            accepted=is_confident(needle.confidence, gate),
+                        )
+                        if not is_confident(needle.confidence, gate):
+                            return retry(
+                                state,
+                                f"The edited {call.name} call scores "
+                                f"{needle.confidence:.2f}, below its {gate:.2f} gate. "
+                                "Nothing was executed.",
+                                "confidence",
+                            )
+                        return {
+                            "tool_call": call.model_dump(),
+                            "messages": append(
+                                state,
+                                f"Runtime approval granted for the edited {call.name} call. "
+                                "Do not ask for permission via ask_user. "
+                                "This is not approval for any other action.",
+                                "permission",
+                            ),
+                        }
         except ToolError as exc:
             return retry(state, f"Safety check blocked the action: {exc}", "safety")
         emit("safety", tool=call.name, allowed=True)

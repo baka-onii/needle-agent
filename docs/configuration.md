@@ -55,6 +55,7 @@ max_tool_steps = 20
 max_stalls = 3
 max_repeated_failures = 2
 max_context_chars = 32000
+max_context_tokens = 65536 # real tokens when the server tokenizer resolves
 max_tool_output_chars = 20000
 
 [tools]

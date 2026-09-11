@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import secrets
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -26,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from agent_runtime import Agent, AgentConfig, ToolCall, ToolError
 from agent_runtime.config import MAX_CONFIG_BYTES, MAX_PROMPT_CHARS, export_config, parse_config
 from agent_runtime.context.manager import ContextManager
+from agent_runtime.models.action import NeedleResult
 from agent_runtime.models.demo import DemoActionModel, DemoReasoningModel
 from agent_runtime.models.needle import NeedleActionModel
 from agent_runtime.models.reasoning import (
@@ -34,8 +37,10 @@ from agent_runtime.models.reasoning import (
     build_system_prompt,
     build_translator_prompt,
 )
+from agent_runtime.store import ConversationStore
 from agent_runtime.tools.base import approval_summary
 from agent_runtime.tools.filesystem import SKIP_DIRS, resolve_safe_path
+from agent_runtime.tools.preview import approval_diff
 from agent_runtime.tools.registry import create_default_registry
 
 MAX_BODY_BYTES = 512_000
@@ -52,6 +57,15 @@ class WebError(Exception):
     def __init__(self, status: int, message: str):
         self.status, self.message = status, message
         super().__init__(message)
+
+
+def _open_store(store_path: str | None) -> ConversationStore | None:
+    if store_path is None:
+        return None
+    try:
+        return ConversationStore(store_path)
+    except (OSError, ValueError, sqlite3.Error):
+        return None
 
 
 _DEFAULT_CONFIG = AgentConfig()
@@ -75,6 +89,7 @@ class Settings(BaseModel):
     max_stalls: int = Field(default=_DEFAULT_CONFIG.max_stalls, ge=1, le=20)
     max_repeated_failures: int = Field(default=_DEFAULT_CONFIG.max_repeated_failures, ge=1, le=10)
     max_context_chars: int = Field(default=_DEFAULT_CONFIG.max_context_chars, ge=8000, le=262144)
+    max_context_tokens: int = Field(default=_DEFAULT_CONFIG.max_context_tokens, ge=1000, le=1000000)
     max_tool_output_chars: int = Field(
         default=_DEFAULT_CONFIG.max_tool_output_chars, ge=128, le=100000
     )
@@ -165,6 +180,7 @@ class Answer(BaseModel):
     question_id: str
     answer: str | None = Field(default=None, max_length=8_000)
     approved: bool | None = None
+    arguments: dict[str, Any] | None = None
 
 
 @dataclass
@@ -186,6 +202,7 @@ class Run:
     model_trace_events: int = 0
     trace_limited: bool = False
     context_chars: int = 0
+    context_tokens: int | None = None
 
     def push(self, event: dict) -> None:
         with self.condition:
@@ -222,10 +239,18 @@ class Run:
                 self.steps = event["step"]
             if event.get("context_chars") is not None:
                 self.context_chars = int(event["context_chars"])
+            if event.get("context_tokens") is not None:
+                self.context_tokens = int(event["context_tokens"])
             self.elapsed_ms = event["elapsed_ms"]
             self.condition.notify_all()
 
-    def wait_for_user(self, kind: str, question: str, call: ToolCall | None = None) -> str | bool:
+    def wait_for_user(
+        self,
+        kind: str,
+        question: str,
+        call: ToolCall | None = None,
+        extra: dict | None = None,
+    ) -> str | bool | dict:
         with self.condition:
             if self.cancel.is_set():
                 raise ToolError("Run cancelled.")
@@ -234,6 +259,7 @@ class Run:
                 "kind": kind,
                 "question": question,
                 "call": call.model_dump() if call else None,
+                **(extra or {}),
             }
             self.reply = None
             self.status = "WAITING_FOR_INPUT"
@@ -273,6 +299,7 @@ class Run:
                 "elapsed_ms": self.elapsed_ms,
                 "trace_limited": self.trace_limited,
                 "context_chars": self.context_chars,
+                "context_tokens": self.context_tokens,
             }
             if include_events:
                 data["events"] = list(self.events)
@@ -310,7 +337,14 @@ class BrowserSession:
 
 
 class WorkspaceService:
-    def __init__(self, config: AgentConfig, *, demo: bool = False, agent_factory=None):
+    def __init__(
+        self,
+        config: AgentConfig,
+        *,
+        demo: bool = False,
+        agent_factory=None,
+        store_path: str | None = None,
+    ):
         root = Path(config.workspace_root or Path.cwd()).resolve()
         if not root.is_dir():
             raise ValueError("Workspace must be an existing directory.")
@@ -321,6 +355,65 @@ class WorkspaceService:
         self.sessions: dict[str, BrowserSession] = {}
         self.lock = threading.RLock()
         self.agent_factory = agent_factory or self._make_agent
+        self.store = _open_store(store_path)
+        if self.store is not None:
+            self._restore()
+
+    def _remember(self, session: BrowserSession) -> None:
+        """Best-effort write-through; storage never breaks a run."""
+        if self.store is None:
+            return
+        try:
+            self.store.save_session(
+                session.token, json.dumps(session.settings.model_dump())
+            )
+            for conversation in session.conversations.values():
+                self.store.save_conversation(
+                    conversation.id,
+                    session.token,
+                    conversation.title,
+                    conversation.messages,
+                    conversation.history,
+                    conversation.updated_at,
+                )
+        except (OSError, ValueError, sqlite3.Error):
+            pass
+
+    def _restore(self) -> None:
+        assert self.store is not None
+        try:
+            data = self.store.load()
+        except (OSError, ValueError, sqlite3.Error):
+            return
+        for token, settings_data in data["sessions"].items():
+            try:
+                settings = Settings.model_validate(settings_data)
+            except ValidationError:
+                continue
+            session = BrowserSession(token, settings)
+            self.sessions[token] = session
+            for conv in data["conversations"]:
+                if conv["session_token"] != token:
+                    continue
+                conversation = session.conversations[conv["id"]] = Conversation(conv["id"])
+                conversation.title = conv["title"]
+                conversation.messages = conv["messages"]
+                conversation.history = conv["history"]
+                conversation.updated_at = conv["updated_at"]
+            for snapshot in data["runs"]:
+                run = Run(
+                    snapshot["id"],
+                    snapshot["conversation_id"],
+                    snapshot.get("mode", "demo"),
+                )
+                run.status = snapshot.get("status", "COMPLETED")
+                run.steps = snapshot.get("steps", 0)
+                run.elapsed_ms = snapshot.get("elapsed_ms", 0)
+                run.trace_limited = snapshot.get("trace_limited", False)
+                run.context_chars = snapshot.get("context_chars", 0)
+                run.context_tokens = snapshot.get("context_tokens")
+                run.pending, run.done = None, True
+                session.runs[run.id] = run
 
     def session(self, token: str | None, *, create: bool = False) -> BrowserSession:
         with self.lock:
@@ -340,6 +433,7 @@ class WorkspaceService:
             token = secrets.token_urlsafe(32)
             session = BrowserSession(token, self.default_settings.model_copy())
             self.sessions[token] = session
+            self._remember(session)
             return session
 
     def run_config(self, settings: Settings) -> AgentConfig:
@@ -377,6 +471,7 @@ class WorkspaceService:
                 raise WebError(403, "The server was started in read-only mode.")
             self.run_config(settings)
             session.settings = settings
+            self._remember(session)
 
     def import_settings(self, session: BrowserSession, document: ConfigImport) -> dict:
         values = parse_config(document.content, format=document.format)
@@ -397,18 +492,26 @@ class WorkspaceService:
             if settings.mode == "demo"
             else {}
         )
+        config = self.run_config(settings)
+
+        def approve(call: ToolCall) -> bool | ToolCall:
+            outcome = run.wait_for_user(
+                "approval",
+                f"Allow {approval_summary(call)}?",
+                call,
+                {"diff": approval_diff(call, config)},
+            )
+            if isinstance(outcome, dict):
+                if outcome.get("call") is not None:
+                    return ToolCall.model_validate(outcome["call"])
+                return outcome.get("approved") is True
+            return outcome is True
+
         return Agent(
-            self.run_config(settings),
+            config,
             **models,
             ask_fn=lambda question: str(run.wait_for_user("question", question)),
-            approve_fn=lambda call: (
-                run.wait_for_user(
-                    "approval",
-                    f"Allow {approval_summary(call)}?",
-                    call,
-                )
-                is True
-            ),
+            approve_fn=approve,
         )
 
     def bootstrap(self, session: BrowserSession) -> dict:
@@ -424,6 +527,9 @@ class WorkspaceService:
                 "api_key_configured": bool(self.config.llm_api_key),
                 "read_only_enforced": self.config.read_only,
                 "tools": [tool.needle_schema() for tool in registry.list()],
+                "payload_args": {
+                    tool.name: list(tool.payload_args) for tool in registry.list()
+                },
                 "conversations": [c.summary() for c in session.conversations.values()],
                 "runs": [run.snapshot() for run in session.runs.values()],
             }
@@ -456,6 +562,11 @@ class WorkspaceService:
             for run in related:
                 del session.runs[run.id]
             del session.conversations[conversation_id]
+            if self.store is not None:
+                try:
+                    self.store.delete_conversation(conversation_id)
+                except (OSError, ValueError, sqlite3.Error):
+                    pass
 
     def new_conversation(self, session: BrowserSession) -> Conversation:
         with session.lock:
@@ -466,6 +577,7 @@ class WorkspaceService:
                 self.delete_conversation(session, oldest)
             conversation = Conversation(secrets.token_hex(12))
             session.conversations[conversation.id] = conversation
+            self._remember(session)
             return conversation
 
     def start_run(self, session: BrowserSession, conversation_id: str, message: str) -> Run:
@@ -494,6 +606,7 @@ class WorkspaceService:
                 daemon=True,
             )
             thread.start()
+            self._remember(session)
             return run
 
     def _work(self, session, conversation, run, settings, message) -> None:
@@ -522,6 +635,12 @@ class WorkspaceService:
                         "elapsed_ms": event["elapsed_ms"],
                     }
                 )
+            self._remember(session)
+            if self.store is not None:
+                try:
+                    self.store.save_run(run.snapshot())
+                except (OSError, ValueError, sqlite3.Error):
+                    pass
 
         agent = None
         try:
@@ -556,7 +675,15 @@ class WorkspaceService:
             if pending["kind"] == "approval":
                 if answer.approved is None or answer.answer is not None:
                     raise WebError(400, "A write approval requires a boolean approved value.")
-                run.reply = answer.approved
+                edited = None
+                if answer.arguments is not None:
+                    if not answer.approved:
+                        raise WebError(
+                            400, "Edited arguments require approval to be granted."
+                        )
+                    edited = self._edited_call(pending, answer.arguments)
+                run.reply = {"approved": answer.approved, "call": edited}
+                event_answer = answer.approved
             else:
                 if (
                     answer.answer is None
@@ -565,16 +692,44 @@ class WorkspaceService:
                 ):
                     raise WebError(400, "A nonempty text answer is required.")
                 run.reply = answer.answer.strip()
+                event_answer = run.reply
             run.push(
                 {
                     "type": "user_answer",
                     "question_id": answer.question_id,
-                    "answer": run.reply,
+                    "answer": event_answer,
                     "kind": pending["kind"],
                     "tool": (pending.get("call") or {}).get("name"),
+                    "edited": edited is not None
+                    if pending["kind"] == "approval"
+                    else False,
                 }
             )
             run.condition.notify_all()
+
+    def _edited_call(self, pending: dict, arguments: Any) -> dict:
+        """Validate user-edited approval arguments. The tool itself is fixed."""
+        from agent_runtime.execution.sanitizer import sanitize
+        from agent_runtime.execution.validator import validate
+
+        if not isinstance(arguments, dict):
+            raise WebError(400, "Edited arguments must be an object.")
+        name = (pending.get("call") or {}).get("name")
+        if not name:
+            raise WebError(400, "This approval carries no tool call to edit.")
+        registry = create_default_registry(self.config)
+        try:
+            call = sanitize(
+                NeedleResult(
+                    selected_tool=name,
+                    arguments=arguments,
+                    confidence=1.0,
+                )
+            )
+            validate(call, registry)
+        except ToolError as exc:
+            raise WebError(400, f"Edited arguments are invalid: {exc}") from exc
+        return call.model_dump()
 
     def list_files(self, path: str) -> dict:
         root = resolve_safe_path(path, self.config.workspace_root)
@@ -644,6 +799,11 @@ class WorkspaceService:
             for session in self.sessions.values():
                 for run in session.runs.values():
                     run.stop()
+        if self.store is not None:
+            try:
+                self.store.close()
+            except (OSError, sqlite3.Error):
+                pass
 
 
 def make_server(service: WorkspaceService, host: str = "0.0.0.0", port: int = 3000):
@@ -876,7 +1036,10 @@ def make_server(service: WorkspaceService, host: str = "0.0.0.0", port: int = 30
 def serve(
     config: AgentConfig, *, demo: bool = False, host: str = "0.0.0.0", port: int = 3000
 ) -> None:
-    service = WorkspaceService(config, demo=demo)
+    from agent_runtime.store import default_db_path
+
+    store_path = os.environ.get("NEEDLE_SESSIONS_DB") or default_db_path()
+    service = WorkspaceService(config, demo=demo, store_path=store_path)
     server = make_server(service, host, port)
     print(f"Needle workspace: http://{host}:{server.server_port}", flush=True)
     print(

@@ -153,11 +153,22 @@ def test_reasoning_prompt_documents_payload_contracts():
 
     tools = create_default_registry(AgentConfig()).list()
     prompt = build_system_prompt(tools)
-    assert "payload: one <content> block fills 'content'" in prompt
+    assert "Payload: <content> fills 'content'." in prompt
     assert "<text-1> fills 'old_text', <text-2> fills 'new_text'" in prompt
+    block = "\n".join(tool.reasoning_description() for tool in tools)
+    assert len(block) <= 4500
 
 
 def test_reasoning_prompt_guides_temp_file_staging():
     prompt = AgentConfig().reasoning_prompt
     assert "temp file" in prompt.casefold()
     assert "scratch/" in prompt
+
+
+def test_reasoning_prompt_stays_compact_ascii_and_task_oriented():
+    from agent_runtime.config import default_asset
+
+    raw = default_asset("prompts/reasoning.md")
+    raw.encode("ascii")
+    assert raw.count("\n") < 75
+    assert "tasks.md" in raw and "[x]" in raw

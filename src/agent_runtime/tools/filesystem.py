@@ -62,6 +62,12 @@ def workspace_description(config: AgentConfig) -> str:
     lines.append(truncate_text(listing, config.workspace_listing_chars))
     if limited:
         lines.append("(entry limit reached; inspect a specific subdirectory if needed)")
+    tasks = root / "tasks.md"
+    try:
+        if tasks.is_file() and not tasks.is_symlink():
+            lines.append("A tasks.md plan exists: read it first and keep it updated.")
+    except OSError:
+        pass
     return "\n".join(lines)
 
 

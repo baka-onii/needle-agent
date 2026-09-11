@@ -1671,6 +1671,57 @@ body.sidebar-compact .local-card {
   font: 10px/1.7 var(--mono);
   white-space: pre-wrap;
 }
+.pending-diff span {
+  display: block;
+}
+.pending-diff .diff-add {
+  color: #6d8659;
+}
+.pending-diff .diff-del {
+  color: #a5764f;
+}
+.pending-diff .diff-hunk {
+  color: #8b93a8;
+}
+.approval-edit-toggle {
+  margin-top: 10px;
+}
+.approval-editor {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+.approval-field {
+  display: grid;
+  gap: 5px;
+}
+.approval-field > span {
+  font: 9px var(--mono);
+  color: #8a835f;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.approval-field > span small {
+  font-family: var(--sans);
+  font-size: 9px;
+  color: #b3a988;
+}
+.approval-field input,
+.approval-field textarea {
+  border: 1px solid #e4d9c4;
+  background: #fffef8;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: 11px/1.6 var(--mono);
+  color: #6d5f36;
+  width: 100%;
+}
+.approval-field textarea {
+  resize: none;
+  overflow-y: hidden;
+  min-height: 80px;
+}
 .pending-actions {
   display: flex;
   gap: 8px;
@@ -4012,6 +4063,21 @@ html[data-theme="dark"]
   color: var(--muted);
 }
 html[data-theme="dark"] .model-error {
+  color: var(--danger);
+}
+html[data-theme="dark"]
+  :is(.approval-field input, .approval-field textarea) {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--ink);
+}
+html[data-theme="dark"] :is(.approval-field > span, .approval-edit-toggle) {
+  color: var(--muted);
+}
+html[data-theme="dark"] :is(.pending-diff .diff-add, .tool-decision.approved) {
+  color: var(--green);
+}
+html[data-theme="dark"] :is(.pending-diff .diff-del, .tool-decision.declined) {
   color: var(--danger);
 }
 @media (max-width: 650px) {

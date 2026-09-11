@@ -16,6 +16,7 @@ from pathlib import Path
 from agent_runtime import Agent, AgentConfig, ToolCall
 from agent_runtime.config import export_config, init_config, load_config, read_prompt
 from agent_runtime.tools.base import approval_summary, truncate_text
+from agent_runtime.tools.preview import approval_diff
 
 _REPO_ROOT = Path(
     os.environ.get("NEEDLE_REPO_ROOT", Path(__file__).resolve().parent.parent.parent)
@@ -64,6 +65,7 @@ def _add_config_arguments(parser: argparse.ArgumentParser) -> None:
         ("confidence-threshold", "confidence_threshold", float),
         ("read-only-threshold", "read_only_threshold", float),
         ("max-context-chars", "max_context_chars", int),
+        ("max-context-tokens", "max_context_tokens", int),
         ("llm-max-tokens", "llm_max_tokens", int),
         ("needle-max-tokens", "needle_max_tokens", int),
         ("temperature", "llm_temperature", float),
@@ -174,6 +176,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     live.add_argument("--fg-port", type=int, default=8081)
     live.add_argument(
+        "--gpu-translator",
+        action="store_true",
+        help="Offload the translator to GPU (-ngl all). Default is CPU (-ngl 0): "
+        "the 270M translator answers in ~0.6s on CPU and leaves the GPU free "
+        "for the reasoning model.",
+    )
+    live.add_argument(
         "--no-server-start",
         action="store_true",
         help="Use the already-running translator server instead of starting one",
@@ -212,12 +221,20 @@ def _config_from_args(args: argparse.Namespace) -> AgentConfig:
     return load_config(args.config, overrides=values)
 
 
-def _approve(call: ToolCall) -> bool:
+def _approve(call: ToolCall, config=None) -> bool:
     print(f"\nApproval requested: {approval_summary(call)}")
-    for key in ("content", "code", "command", "patch", "message"):
-        if call.arguments.get(key):
-            print(truncate_text(str(call.arguments[key]), 2_000))
-            break
+    shown = False
+    if config is not None:
+        diff = approval_diff(call, config)
+        if diff is not None:
+            print(f"--- {diff['label']} ---")
+            print(truncate_text(diff["text"], 2_000))
+            shown = True
+    if not shown:
+        for key in ("content", "code", "command", "patch", "message"):
+            if call.arguments.get(key):
+                print(truncate_text(str(call.arguments[key]), 2_000))
+                break
     try:
         return input("Allow this action? [y/N] ").strip().lower() in {"y", "yes"}
     except EOFError:
@@ -305,7 +322,7 @@ def _resolve_translator_server(args: argparse.Namespace) -> tuple[str, subproces
             [
                 binary,
                 "-m", gguf,
-                "-ngl", "all",
+                "-ngl", "all" if args.gpu_translator else "0",
                 "-fa", "on",
                 "-c", "32768",
                 "--port", str(args.fg_port),
@@ -368,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
 
             serve(config, demo=config.mode == "demo", host=args.host, port=args.port)
             return 0
-        with Agent(config, approve_fn=_approve) as agent:
+        with Agent(config, approve_fn=lambda call: _approve(call, config)) as agent:
             if args.command == "run":
                 result = agent.run(args.request, on_event=_trace if args.trace else None)
                 if args.json:

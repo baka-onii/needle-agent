@@ -531,18 +531,104 @@ def test_approval_answer_event_carries_tool_name(web):
     call = ToolCall(name="run_python", arguments={"code": "print(1)"})
     outcome = {}
     worker = threading.Thread(
+        daemon=True,
         target=lambda: outcome.setdefault(
             "reply", run.wait_for_user("approval", "Allow Python run?", call)
         )
     )
     worker.start()
-    assert run.condition.wait_for(lambda: run.pending is not None, timeout=5)
+    with run.condition:
+        assert run.condition.wait_for(lambda: run.pending is not None, timeout=5)
     service.answer(run, Answer(question_id=run.pending["question_id"], approved=True))
     worker.join(timeout=5)
-    assert outcome["reply"] is True
+    assert outcome["reply"] == {"approved": True, "call": None}
     answers = [event for event in run.events if event["type"] == "user_answer"]
     assert len(answers) == 1
     assert answers[0]["kind"] == "approval" and answers[0]["tool"] == "run_python"
+    assert answers[0]["answer"] is True and answers[0]["edited"] is False
+
+
+def test_approval_pending_carries_diff_and_accepts_edits(web):
+    import threading
+
+    from agent_runtime.server import Answer, Run
+    from agent_runtime.tools.base import ToolCall
+
+    service, _, root = web
+    (root / "note.txt").write_text("line one\nline two\n")
+    session = service.session(None, create=True)
+    run = Run(id="r", conversation_id="c", mode="demo")
+    call = ToolCall(
+        name="replace_text",
+        arguments={"path": "note.txt", "old_text": "line two", "new_text": "LINE TWO"},
+    )
+    agent = service._make_agent(session.settings, run)
+    outcome = {}
+    worker = threading.Thread(
+        daemon=True,
+        target=lambda: outcome.setdefault("reply", agent._approve(call))
+    )
+    worker.start()
+    with run.condition:
+        assert run.condition.wait_for(lambda: run.pending is not None, timeout=5)
+    diff = run.pending["diff"]
+    assert diff["label"] == "Replace text" and "-line two" in diff["text"]
+    assert "+LINE TWO" in diff["text"] and "near line 2" in diff["text"]
+    service.answer(
+        run,
+        Answer(
+            question_id=run.pending["question_id"],
+            approved=True,
+            arguments={
+                "path": "note.txt",
+                "old_text": "line two",
+                "new_text": "LINE 2!",
+            },
+        ),
+    )
+    worker.join(timeout=5)
+    assert isinstance(outcome["reply"], ToolCall)
+    assert outcome["reply"].arguments["new_text"] == "LINE 2!"
+    answers = [event for event in run.events if event["type"] == "user_answer"]
+    assert answers[0]["edited"] is True
+
+
+def test_approval_edits_are_validated(web):
+    from agent_runtime.server import Answer, Run, WebError
+
+    service, _, _ = web
+
+    def pending_run(**pending):
+        run = Run(id="r", conversation_id="c", mode="demo")
+        run.pending = {
+            "question_id": "q",
+            "kind": "approval",
+            "question": "Allow?",
+            "call": {
+                "name": "run_python",
+                "arguments": {"code": "print(1)"},
+            },
+            **pending,
+        }
+        return run
+
+    run = pending_run()
+    with pytest.raises(WebError):
+        service.answer(run, Answer(question_id="q", approved=True, arguments={"bogus": 1}))
+    with pytest.raises(ValueError):
+        Answer(question_id="q", approved=True, arguments=["nope"])
+    with pytest.raises(WebError):
+        service.answer(
+            run, Answer(question_id="q", approved=False, arguments={"code": "print(2)"})
+        )
+    assert run.reply is None and run.pending is not None
+    service.answer(
+        run, Answer(question_id="q", approved=True, arguments={"code": "print(2)"})
+    )
+    assert run.reply == {
+        "approved": True,
+        "call": {"name": "run_python", "arguments": {"code": "print(2)"}},
+    }
 
 
 def test_auto_approve_is_session_only_and_validated(web):

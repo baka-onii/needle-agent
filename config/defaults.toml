@@ -8,6 +8,9 @@ max_stalls = 3
 max_repeated_failures = 2
 max_tool_output_chars = 20000
 max_context_chars = 32000
+# Model-window budget in real tokens (used when the server tokenizer
+# resolves; otherwise the char budget above applies). Ornith serves 64k.
+max_context_tokens = 65536
 
 [workspace]
 workspace_root = "."

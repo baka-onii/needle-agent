@@ -190,6 +190,8 @@ const S = {
   settings: null,
   workspace: null,
   tools: [],
+  payloadArgs: {},
+  edits: {},
   conversations: [],
   runs: new Map(),
   conversation: null,
@@ -474,10 +476,15 @@ function formatChars(value) {
 function updateContextMeter() {
   const node = $("#context-meter");
   if (!node) return;
-  const total = S.settings?.max_context_chars || 0;
-  const used = currentRun()?.context_chars || 0;
+  // Real tokens once a run reports them, else the char budget.
+  const tokens = currentRun()?.context_tokens ?? null;
+  const total =
+    tokens !== null
+      ? S.settings?.max_context_tokens || 0
+      : S.settings?.max_context_chars || 0;
+  const used = tokens !== null ? tokens : currentRun()?.context_chars || 0;
   node.textContent = total
-    ? `${formatChars(used)} / ${formatChars(total)} context`
+    ? `${formatChars(used)} / ${formatChars(total)} ${tokens !== null ? "tokens" : "chars"}`
     : "";
   node.classList.toggle("warn", total > 0 && used / total >= 0.8 && used / total < 0.95);
   node.classList.toggle("critical", total > 0 && used / total >= 0.95);
@@ -530,6 +537,8 @@ function reduceModelEvent(run, event, replay = false) {
   const now = performance.now();
   if (event.context_chars !== undefined && event.context_chars !== null)
     run.context_chars = event.context_chars;
+  if (event.context_tokens !== undefined && event.context_tokens !== null)
+    run.context_tokens = event.context_tokens;
   if (event.type === "model_start") {
     run.models.set(event.model_id, {
       ...event,
@@ -795,7 +804,8 @@ function renderDecision(decision) {
   const label = decision.tool
     ? toolLabel(decision.tool)
     : "action";
-  return `<div class="tool-decision ${approved ? "approved" : "declined"}">${icon(approved ? "check" : "close", true)}<span>You ${approved ? "approved" : "declined"} the ${esc(label)}.</span></div>`;
+  const edited = decision.edited ? "edited " : "";
+  return `<div class="tool-decision ${approved ? "approved" : "declined"}">${icon(approved ? "check" : "close", true)}<span>You ${approved ? "approved" : "declined"} the ${edited}${esc(label)}.</span></div>`;
 }
 function approvalPreview(call) {
   if (!call || !call.arguments) return "(no details)";
@@ -805,6 +815,84 @@ function approvalPreview(call) {
   const text = String(preview);
   return text ? text : "(no details)";
 }
+function renderDiff(diff) {
+  if (!diff || !diff.text) return "";
+  const lines = String(diff.text)
+    .split("\n")
+    .map((line) => {
+      const cls =
+        line.startsWith("+") && !line.startsWith("+++")
+          ? "diff-add"
+          : line.startsWith("-") && !line.startsWith("---")
+            ? "diff-del"
+            : line.startsWith("@@")
+              ? "diff-hunk"
+              : "";
+      return `<span class="${cls}">${esc(line) || " "}</span>`;
+    })
+    .join("\n");
+  return `<div class="tool-detail-label">${esc(diff.label || "Proposed change")}</div><pre class="pending-diff">${lines}</pre>`;
+}
+function stringifyArg(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
+}
+function approvalEditor(run, call) {
+  const draft = S.edits[run.id] || { open: false, values: {} };
+  const tool = (S.tools || []).find((item) => item.name === call.name);
+  const props = tool?.parameters?.properties || {};
+  const required = tool?.parameters?.required || [];
+  const payloads = new Set((S.payloadArgs || {})[call.name] || []);
+  const names = [...Object.keys(call.arguments || {})];
+  for (const key of Object.keys(props))
+    if (!names.includes(key)) names.push(key);
+  const rows = names
+    .map((key) => {
+      const schema = props[key] || {};
+      const current =
+        draft.values[key] !== undefined
+          ? draft.values[key]
+          : stringifyArg(call.arguments?.[key]);
+      const field = payloads.has(key)
+        ? `<textarea data-edit-arg="${esc(key)}" rows="5">${esc(current)}</textarea>`
+        : `<input data-edit-arg="${esc(key)}" value="${esc(current)}" spellcheck="false">`;
+      const hint = [required.includes(key) ? "required" : null, schema.type]
+        .filter(Boolean)
+        .join(" · ");
+      return `<label class="approval-field"><span>${esc(key)}${hint ? `<small>${esc(hint)}</small>` : ""}</span>${field}</label>`;
+    })
+    .join("");
+  return `<button type="button" class="text-button approval-edit-toggle" data-edit-toggle="${esc(run.id)}" aria-expanded="${Boolean(draft.open)}">${icon("tools", true)}${draft.open ? "Hide editor" : "Edit arguments"}</button><div class="approval-editor${draft.open ? "" : " hidden"}">${rows}<p class="pending-hint">Edited arguments are re-validated and re-gated before anything runs.</p></div>`;
+}
+function coerceArg(schema, value) {
+  const text = String(value ?? "");
+  const types = Array.isArray(schema?.type) ? schema.type : [schema?.type];
+  if (types.includes("integer") && /^-?\d+$/.test(text.trim()))
+    return Number(text.trim());
+  if (
+    types.includes("number") &&
+    text.trim() !== "" &&
+    Number.isFinite(Number(text))
+  )
+    return Number(text);
+  if (types.includes("boolean")) {
+    const lowered = text.trim().toLowerCase();
+    if (lowered === "true") return true;
+    if (lowered === "false") return false;
+  }
+  return text;
+}
+function gatherEditedArgs(run, card) {
+  const call = run.pending?.call;
+  const tool = (S.tools || []).find((item) => item.name === call?.name);
+  const props = tool?.parameters?.properties || {};
+  const args = {};
+  $$("[data-edit-arg]", card).forEach((field) => {
+    args[field.dataset.editArg] = coerceArg(props[field.dataset.editArg], field.value);
+  });
+  return args;
+}
 function renderPending(run) {
   if (!run.pending || run.done) return "";
   const pending = run.pending,
@@ -812,7 +900,9 @@ function renderPending(run) {
   const disabled =
     run.status === "CANCELLING" || pending.submitted ? "disabled" : "";
   const allowLabel = pending.call?.name === "write_file" ? "Allow write" : "Allow action";
-  return `<div class="pending-card"><div class="pending-title">${icon(approval ? "shield" : "chat")}${approval ? "Your permission is needed" : "A quick question for you"}</div><p>${esc(pending.question)}</p>${approval ? `<pre>${esc(approvalPreview(pending.call))}</pre><p class="pending-hint">Nothing runs until you approve.</p><div class="pending-actions"><button class="button primary small" data-answer-run="${esc(run.id)}" data-approved="true" ${disabled}>${icon("check", true)}${allowLabel}</button><button class="button secondary small" data-answer-run="${esc(run.id)}" data-approved="false" ${disabled}>Deny</button></div>` : '<p class="pending-hint">Type your answer in the message box below to continue.</p>'}</div>`;
+  const diff = approval ? renderDiff(pending.diff) : "";
+  const editor = approval ? approvalEditor(run, pending.call || { arguments: {} }) : "";
+  return `<div class="pending-card"><div class="pending-title">${icon(approval ? "shield" : "chat")}${approval ? "Your permission is needed" : "A quick question for you"}</div><p>${esc(pending.question)}</p>${approval ? `${diff || `<pre>${esc(approvalPreview(pending.call))}</pre>`}${editor}<p class="pending-hint">Nothing runs until you approve.</p><div class="pending-actions"><button class="button primary small" data-answer-run="${esc(run.id)}" data-approved="true" ${disabled}>${icon("check", true)}${allowLabel}</button><button class="button secondary small" data-answer-run="${esc(run.id)}" data-approved="edited" ${disabled}>${icon("tools", true)}Approve edited</button><button class="button secondary small" data-answer-run="${esc(run.id)}" data-approved="false" ${disabled}>Deny</button></div>` : '<p class="pending-hint">Type your answer in the message box below to continue.</p>'}</div>`;
 }
 function renderAssistant(message) {
   const run = S.runs.get(message.run_id);
@@ -1031,6 +1121,7 @@ function applyEvent(run, event) {
   if (event.type === "question_expired" || event.type === "user_answer") {
     run.pending = null;
     run.status = "RUNNING";
+    delete S.edits[run.id];
   }
   if (event.type === "cancelling") run.status = "CANCELLING";
   if (event.type === "complete") {
@@ -1976,6 +2067,20 @@ document.addEventListener("input", (event) => {
     S.fileFilter = event.target.value;
     $("#file-list").innerHTML = fileRows();
   }
+  if (event.target.matches?.("[data-edit-arg]")) {
+    const article = event.target.closest("[data-message-run]");
+    const runId = article?.dataset.messageRun;
+    if (runId) {
+      const draft = S.edits[runId] || { open: true, values: {} };
+      draft.open = true;
+      draft.values[event.target.dataset.editArg] = event.target.value;
+      S.edits[runId] = draft;
+    }
+    if (event.target.tagName === "TEXTAREA") {
+      event.target.style.height = "auto";
+      event.target.style.height = `${event.target.scrollHeight}px`;
+    }
+  }
 });
 document.addEventListener("click", async (event) => {
   const target = event.target.closest("button");
@@ -2014,10 +2119,30 @@ document.addEventListener("click", async (event) => {
       showView("playground");
       await sendMessage(`Read the file ${target.dataset.askFile}`);
     }
-    if (target.dataset.answerRun)
-      await answerRun(target.dataset.answerRun, {
-        approved: target.dataset.approved === "true",
-      });
+    if (target.dataset.answerRun) {
+      const mode = target.dataset.approved;
+      if (mode === "edited") {
+        const run = S.runs.get(target.dataset.answerRun);
+        const card = target.closest(".pending-card");
+        const args = run && card ? gatherEditedArgs(run, card) : {};
+        await answerRun(target.dataset.answerRun, {
+          approved: true,
+          arguments: args,
+        });
+      } else
+        await answerRun(target.dataset.answerRun, {
+          approved: mode === "true",
+        });
+    }
+    if (target.dataset.editToggle) {
+      const draft = S.edits[target.dataset.editToggle] || {
+        open: false,
+        values: {},
+      };
+      draft.open = !draft.open;
+      S.edits[target.dataset.editToggle] = draft;
+      renderConversation();
+    }
     if (target.classList.contains("dialog-close"))
       target.closest("dialog").close();
     if (target.classList.contains("copy-code"))
@@ -2071,6 +2196,7 @@ async function boot() {
     S.settings = data.settings;
     S.workspace = data.workspace;
     S.tools = data.tools;
+    S.payloadArgs = data.payload_args || {};
     S.conversations = data.conversations;
     for (const run of data.runs) S.runs.set(run.id, run);
     S.ready = true;

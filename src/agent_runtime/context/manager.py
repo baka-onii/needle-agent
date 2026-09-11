@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from agent_runtime.config import AgentConfig
+from agent_runtime.models.tokens import TokenCounter, count_texts
 from agent_runtime.tools.base import truncate_text
 
 
@@ -23,13 +24,21 @@ def _observation(message: dict[str, Any]) -> bool:
 
 
 class ContextManager:
-    def __init__(self, config: AgentConfig, system_prompt: str) -> None:
+    def __init__(
+        self,
+        config: AgentConfig,
+        system_prompt: str,
+        counter: TokenCounter | None = None,
+    ) -> None:
         if len(system_prompt) >= config.max_context_chars:
             raise ValueError(
                 "Context budget is too small for the system prompt and tool descriptions."
             )
         self._config = config
         self._system_prompt = system_prompt
+        self._counter = counter
+        self.last_chars = 0
+        self.last_tokens: int | None = None
 
     @property
     def system_prompt(self) -> str:
@@ -54,4 +63,36 @@ class ContextManager:
             tail.pop(index)
         if total_chars([m for _, m in tail]) > remaining:
             tail[-1][1]["content"] = truncate_text(str(tail[-1][1].get("content", "")), remaining)
-        return [system, *(message for _, message in sorted([*pinned, *tail]))]
+        built = [system, *(message for _, message in sorted([*pinned, *tail]))]
+        self.last_chars = total_chars(built)
+        self.last_tokens = count_texts(
+            self._counter, [str(message.get("content", "")) for message in built]
+        )
+        if self.last_tokens is not None:
+            built = self._fit_tokens(built)
+        return built
+
+    def _fit_tokens(self, built: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop oldest observations until the token budget fits (bounded calls)."""
+        budget = self._config.max_context_tokens
+        tokens = self.last_tokens or 0
+        for _ in range(len(built)):
+            if tokens <= budget or len(built) <= 2:
+                break
+            # Only observations are expendable: never drop the system prompt,
+            # the pinned requests, or the newest message.
+            index = next(
+                (i for i, message in enumerate(built[1:-1]) if _observation(message)),
+                None,
+            )
+            if index is None:
+                break
+            built.pop(index + 1)
+            tokens = (
+                count_texts(
+                    self._counter, [str(message.get("content", "")) for message in built]
+                )
+                or 0
+            )
+        self.last_tokens = tokens
+        return built

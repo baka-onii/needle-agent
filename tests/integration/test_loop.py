@@ -417,3 +417,128 @@ def test_translator_placeholder_never_executes(workspace: Path) -> None:
         and "content" in e.get("message", "")
         for e in events
     )
+
+
+def test_approval_with_edited_arguments_executes_the_edit(workspace: Path) -> None:
+    from agent_runtime.tools.base import ToolCall
+
+    reasoning = ScriptedReasoning(
+        ["<tool>Use run_python to run code.</tool>", "<final>Ran it.</final>"]
+    )
+    action = StubAction(
+        {
+            "run_python": NeedleResult(
+                selected_tool="run_python",
+                arguments={"code": "print(1)"},
+                confidence=1.0,
+            )
+        }
+    )
+    edited = ToolCall(name="run_python", arguments={"code": "print(40 + 2)"})
+    agent = _agent(workspace, reasoning, action, approve_fn=lambda call: edited)
+    state = agent.run("run code")
+    assert state["step_count"] == 1
+    assert state["last_tool_result"]["output"] == "42"
+
+
+VALID_SUMMARY = """task:
+  objective: "Add OAuth authentication"
+
+constraints:
+  - "Keep existing JWT authentication"
+
+completed:
+  - "Refactored token validation"
+
+current:
+  subtask: "Implement Google provider"
+
+files:
+  primary:
+    - src/auth/google.py
+  related:
+    - src/auth/auth.py
+
+decisions:
+  - "Use existing JWT implementation"
+
+blockers: []
+"""
+
+
+class SummaryReasoning(ScriptedReasoning):
+    """Answer snapshot requests with a fixed summary, else queued actions."""
+
+    def __init__(self, responses: list[str], summary: str) -> None:
+        super().__init__(responses)
+        self.summary = summary
+
+    def generate(self, messages: list[dict[str, Any]]) -> str:
+        if "structured state snapshot" in messages[-1]["content"]:
+            return self.summary
+        return super().generate(messages)
+
+
+def _big_history() -> list[dict[str, Any]]:
+    filler = "context filler text. " * 60  # ~1260 chars of history
+    return [
+        {"role": "user", "content": "original big task"},
+        {"role": "assistant", "content": filler},
+        {"role": "user", "content": filler},
+        {"role": "assistant", "content": filler},
+    ]
+
+
+def test_loop_compresses_past_threshold(workspace: Path) -> None:
+    reasoning = SummaryReasoning(
+        [
+            "<tool>Use calculator to calculate 1 + 1.</tool>",
+            "<final>Two.</final>",
+        ],
+        VALID_SUMMARY,
+    )
+    action = StubAction(
+        {
+            "calculate": NeedleResult(
+                selected_tool="calculator",
+                arguments={"expression": "1 + 1"},
+                confidence=1.0,
+            )
+        }
+    )
+    agent = _agent(
+        workspace, reasoning, action, max_context_chars=12000, max_context_tokens=100000
+    )
+    events = list(agent.stream("Calculate 1+1", history=_big_history()))
+    compressed = [e for e in events if e.get("type") == "context_compressed"]
+    assert len(compressed) == 1
+    assert compressed[0]["after_chars"] < compressed[0]["before_chars"]
+    final = [e for e in events if e.get("type") == "complete"]
+    assert final and final[0]["state"]["status"] == "COMPLETED"
+
+
+def test_loop_skips_compression_when_summary_unusable(workspace: Path) -> None:
+    reasoning = SummaryReasoning(
+        [
+            "<tool>Use calculator to calculate 1 + 1.</tool>",
+            "<final>Two.</final>",
+        ],
+        "Just some prose, no shape.",
+    )
+    action = StubAction(
+        {
+            "calculate": NeedleResult(
+                selected_tool="calculator",
+                arguments={"expression": "1 + 1"},
+                confidence=1.0,
+            )
+        }
+    )
+    agent = _agent(
+        workspace, reasoning, action, max_context_chars=12000, max_context_tokens=100000
+    )
+    events = list(agent.stream("Calculate 1+1", history=_big_history()))
+    assert any(e.get("type") == "context_compression_skipped" for e in events)
+    assert not [e for e in events if e.get("type") == "context_compressed"]
+    final = [e for e in events if e.get("type") == "complete"]
+    assert final and final[0]["state"]["status"] == "COMPLETED"

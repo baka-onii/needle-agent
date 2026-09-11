@@ -21,6 +21,7 @@ from agent_runtime.models.reasoning import (
     build_system_prompt,
     build_translator_prompt,
 )
+from agent_runtime.models.tokens import TokenCounter, detect_counter
 from agent_runtime.state import AgentState, create_initial_state
 from agent_runtime.tools.base import ToolCall
 from agent_runtime.tools.registry import ToolRegistry, create_default_registry
@@ -34,7 +35,7 @@ class Agent:
         action: ActionModel | None = None,
         registry: ToolRegistry | None = None,
         ask_fn: Callable[[str], str] | None = None,
-        approve_fn: Callable[[ToolCall], bool] | None = None,
+        approve_fn: Callable[[ToolCall], bool | ToolCall | None] | None = None,
     ) -> None:
         config = config or AgentConfig()
         root = Path(config.workspace_root or Path.cwd()).resolve()
@@ -42,8 +43,15 @@ class Agent:
             raise ValueError(f"Workspace does not exist or is not a directory: {root}")
         self.config = replace(config, workspace_root=str(root))
         self.registry = registry or create_default_registry(self.config, ask_fn)
+        self._counter: TokenCounter | None = (
+            detect_counter(config.llm_base_url, config.llm_model)
+            if config.mode == "live"
+            else None
+        )
         self._contexts = ContextManager(
-            self.config, build_system_prompt(self.registry.list(), self.config)
+            self.config,
+            build_system_prompt(self.registry.list(), self.config),
+            self._counter,
         )
         if self.config.mode == "demo":
             reasoning = reasoning or DemoReasoningModel()
@@ -101,7 +109,9 @@ class Agent:
         if self._owns_action and isinstance(self._action, NeedleActionModel):
             self._action.set_system(build_translator_prompt(self.config))
         contexts = ContextManager(
-            self.config, build_system_prompt(self.registry.list(), self.config)
+            self.config,
+            build_system_prompt(self.registry.list(), self.config),
+            self._counter,
         )
         deps = RuntimeDeps(
             self._reasoning,
