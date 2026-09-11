@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_runtime import AgentConfig
-from agent_runtime.server import WorkspaceService, make_server
+from relay import AgentConfig
+from relay.server import WorkspaceService, make_server
 
 
 @pytest.fixture()
@@ -35,7 +35,7 @@ def web(tmp_path: Path):
 def request(base, path, *, method="GET", data=None, token=None, headers=None, raw=False):
     hdrs = {"Content-Type": "application/json", **(headers or {})}
     if token:
-        hdrs["X-Needle-Session"] = token
+        hdrs["X-Relay-Session"] = token
     req = urllib.request.Request(
         base + path,
         method=method,
@@ -441,7 +441,7 @@ def test_eviction_does_not_leave_orphaned_run_history(web, monkeypatch):
     token, conversation = setup_conversation(base)
     run = start(base, token, conversation, "Calculate 2+2")
     finish(base, token, run["id"])
-    monkeypatch.setattr("agent_runtime.server.MAX_CONVERSATIONS", 1)
+    monkeypatch.setattr("relay.server.MAX_CONVERSATIONS", 1)
     status, new = request(base, "/api/conversations", method="POST", token=token, data={})
     assert status == 201 and new["id"] != conversation
     assert request(base, f"/api/runs/{run['id']}", token=token)[0] == 404
@@ -472,7 +472,7 @@ def test_streaming_settings_roundtrip_and_can_disable_input_capture(web):
 
 def test_model_trace_budget_does_not_break_run_or_final_answer(web, monkeypatch):
     service, base, _ = web
-    monkeypatch.setattr("agent_runtime.server.MAX_MODEL_TRACE_BYTES", 80)
+    monkeypatch.setattr("relay.server.MAX_MODEL_TRACE_BYTES", 80)
     token, conversation = setup_conversation(base)
     run = start(base, token, conversation, "Calculate 6*7")
     events = finish(base, token, run["id"])
@@ -523,8 +523,8 @@ def test_run_tracks_context_chars_in_snapshot(web):
 def test_approval_answer_event_carries_tool_name(web):
     import threading
 
-    from agent_runtime.server import Answer, Run
-    from agent_runtime.tools.base import ToolCall
+    from relay.server import Answer, Run
+    from relay.tools.base import ToolCall
 
     service, _, _ = web
     run = Run(id="r", conversation_id="c", mode="demo")
@@ -551,8 +551,8 @@ def test_approval_answer_event_carries_tool_name(web):
 def test_approval_pending_carries_diff_and_accepts_edits(web):
     import threading
 
-    from agent_runtime.server import Answer, Run
-    from agent_runtime.tools.base import ToolCall
+    from relay.server import Answer, Run
+    from relay.tools.base import ToolCall
 
     service, _, root = web
     (root / "note.txt").write_text("line one\nline two\n")
@@ -594,7 +594,7 @@ def test_approval_pending_carries_diff_and_accepts_edits(web):
 
 
 def test_approval_edits_are_validated(web):
-    from agent_runtime.server import Answer, Run, WebError
+    from relay.server import Answer, Run, WebError
 
     service, _, _ = web
 

@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from agent_runtime.config import AgentConfig
-from agent_runtime.tools.base import ToolError
-from agent_runtime.tools.filesystem import resolve_safe_path
-from agent_runtime.tools.registry import ToolRegistry, create_default_registry
+from relay.config import AgentConfig
+from relay.tools.base import ToolError
+from relay.tools.filesystem import resolve_safe_path
+from relay.tools.registry import ToolRegistry, create_default_registry
 
 
 @pytest.fixture()

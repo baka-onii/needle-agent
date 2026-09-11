@@ -3,10 +3,10 @@
 ## Create and load settings
 
 ```sh
-uv run needle-agent config init needle.toml
-uv run needle-agent serve --config needle.toml --demo
-uv run needle-agent chat --config needle.toml --live
-uv run needle-agent run --config needle.toml --demo 'Calculate 6*7'
+uv run relay config init relay.toml
+uv run relay serve --config relay.toml --demo
+uv run relay chat --config relay.toml --live
+uv run relay run --config relay.toml --demo 'Calculate 6*7'
 ```
 
 `config init` copies the canonical `config/defaults.toml` and the three Markdown prompt
@@ -14,7 +14,7 @@ files into your chosen directory. It refuses to overwrite existing config/prompt
 The same assets are bundled in wheels and source distributions; an installed command
 works without a repository checkout.
 
-Loading is explicit (`--config FILE` or `NEEDLE_CONFIG`). The runtime never auto-loads a
+Loading is explicit (`--config FILE` or `RELAY_CONFIG`). The runtime never auto-loads a
 config merely because it is present in an untrusted workspace. TOML and JSON are accepted
 with the same named sections. Unknown sections/keys, invalid types, non-finite values,
 invalid timezones, unreadable prompt files, and overlarge files fail before inference.
@@ -89,7 +89,7 @@ that cannot return SSE. The `[streaming]` settings are described in the
 
 The `[models]` section optionally accepts `needle_weights`, resolved relative to the file.
 Custom Needle weights currently have no calibrated confidence; missing scores fail closed.
-Keep credentials in `NEEDLE_LLM_API_KEY`. API keys are not file settings, browser settings,
+Keep credentials in `RELAY_LLM_API_KEY`. API keys are not file settings, browser settings,
 or config exports. URLs containing credentials, queries, or fragments are rejected.
 
 See `config/defaults.toml` for the canonical complete list. Basic validity and safety
@@ -134,7 +134,7 @@ as a live language model would. Use live mode to exercise model instruction chan
 All run/chat/serve commands and `config show` support:
 
 ```sh
-needle-agent chat --config needle.toml \
+relay chat --config relay.toml \
   --reasoning-prompt my-reasoning.md --translator-prompt my-translator.md \
   --confirmation-prompt my-review.md \
   --confidence-threshold 0.85 --read-only-threshold 0.5 \
@@ -157,12 +157,12 @@ prints arriving model text as well as tool/gate events to stderr; JSON results s
 credentials or machine-specific Needle weights:
 
 ```sh
-needle-agent config show --config needle.toml > portable.toml
+relay config show --config relay.toml > portable.toml
 ```
 
 The CLI export can include the resolved workspace path; override `--workspace` when
 moving to a different machine. Programmatic users can call
-`agent_runtime.config.load_config(path, overrides=...)` and pass the result to `Agent`.
+`relay.config.load_config(path, overrides=...)` and pass the result to `Agent`.
 
 ## Browser settings and persistence
 

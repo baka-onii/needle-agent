@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build llama-server (CUDA) for the Needle agent harness.
+# Build llama-server (CUDA) for the Relay harness.
 # Usage: scripts/build-llama-server.sh
 # Env overrides: CUDAToolkit_ROOT, CMAKE_BIN, LLAMA_SRC_REF
 set -euo pipefail

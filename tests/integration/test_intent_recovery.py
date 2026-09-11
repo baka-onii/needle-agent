@@ -2,9 +2,9 @@
 
 import pytest
 
-from agent_runtime import Agent, AgentConfig
-from agent_runtime.models.action import NeedleResult, ToolRanking
-from agent_runtime.protocol.intent import write_action
+from relay import Agent, AgentConfig
+from relay.models.action import NeedleResult, ToolRanking
+from relay.protocol.intent import write_action
 
 
 class Reasoning:
@@ -313,7 +313,7 @@ def test_reasoner_can_choose_a_different_candidate(tmp_path):
     ]
 
 
-def test_needles_selection_must_match_reasoners_explicit_choice(tmp_path):
+def test_translator_selection_must_match_reasoners_explicit_choice(tmp_path):
     state, events, model, _ = run(
         tmp_path,
         [tool('Use read_directory to list the directory ".".'), "Wrong selection."],

@@ -4,10 +4,10 @@ import importlib.util
 import json
 from pathlib import Path
 
-from agent_runtime import AgentConfig
+from relay import AgentConfig
 
 spec = importlib.util.spec_from_file_location(
-    "needle_benchmark",
+    "relay_benchmark",
     Path(__file__).parents[2] / "examples" / "benchmark.py",
 )
 benchmark = importlib.util.module_from_spec(spec)
@@ -22,7 +22,7 @@ def test_benchmark_only_cleans_its_own_temporary_directories(tmp_path, monkeypat
     def run(task, config):
         root = Path(config.workspace_root)
         assert root.parent == tmp_path
-        assert root.name.startswith("needle-calc-")
+        assert root.name.startswith("relay-calc-")
         visited.append(root)
         return {"status": "COMPLETED", "success": True, "steps": 1, "invalid": 0, "seconds": 0.0}
 

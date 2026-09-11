@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from agent_runtime import AgentConfig
-from agent_runtime.server import Run, WorkspaceService
-from agent_runtime.store import SESSION_TTL_SECONDS
+from relay import AgentConfig
+from relay.server import Run, WorkspaceService
+from relay.store import SESSION_TTL_SECONDS
 
 
 @pytest.fixture()

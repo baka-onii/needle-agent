@@ -1,7 +1,7 @@
 """P6: context manager."""
 
-from agent_runtime.config import AgentConfig
-from agent_runtime.context.manager import ContextManager, total_chars
+from relay.config import AgentConfig
+from relay.context.manager import ContextManager, total_chars
 
 
 def _manager(budget: int = 100) -> ContextManager:

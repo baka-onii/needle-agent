@@ -6,14 +6,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from agent_runtime.config import AgentConfig
-from agent_runtime.execution.sanitizer import sanitize
-from agent_runtime.execution.validator import validate
-from agent_runtime.models.action import NeedleResult
-from agent_runtime.protocol.parser import parse_response
-from agent_runtime.tools.base import Tool, ToolCall, ToolError, truncate_text
-from agent_runtime.tools.filesystem import resolve_safe_path
-from agent_runtime.tools.registry import ToolRegistry, create_default_registry
+from relay.config import AgentConfig
+from relay.execution.sanitizer import sanitize
+from relay.execution.validator import validate
+from relay.models.action import NeedleResult
+from relay.protocol.parser import parse_response
+from relay.tools.base import Tool, ToolCall, ToolError, truncate_text
+from relay.tools.filesystem import resolve_safe_path
+from relay.tools.registry import ToolRegistry, create_default_registry
 
 
 @pytest.mark.parametrize("score", [math.nan, math.inf, -0.1, 1.1, True, "0.99"])

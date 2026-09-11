@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from agent_runtime.models.tokens import (
+from relay.models.tokens import (
     HeuristicCounter,
     LlamaCppCounter,
     OllamaCounter,
@@ -104,8 +104,8 @@ def test_count_texts_joins(servers):
 
 
 def test_context_manager_trims_to_token_budget(tmp_path):
-    from agent_runtime import AgentConfig
-    from agent_runtime.context.manager import ContextManager
+    from relay import AgentConfig
+    from relay.context.manager import ContextManager
 
     class StubCounter:
         kind = "stub"

@@ -7,7 +7,7 @@ build/
 .pytest_cache/
 .ruff_cache/
 *.cact
-needle_tool_index/
+relay_tool_index/
 .cache/
 .env
 .env.*

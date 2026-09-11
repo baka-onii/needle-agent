@@ -2008,7 +2008,7 @@ agent-runtime/
 ├── CHANGELOG.md
 │
 ├── src/
-│   └── agent_runtime/
+│   └── relay/
 │       ├── __init__.py
 │       ├── agent.py
 │       ├── config.py
@@ -2123,10 +2123,10 @@ The first public API should be intentionally small.
 Potential package surface:
 
 ```python
-from agent_runtime import Agent
-from agent_runtime.config import AgentConfig
-from agent_runtime.models import ReasoningModel, ActionModel
-from agent_runtime.tools import Tool, ToolRegistry
+from relay import Agent
+from relay.config import AgentConfig
+from relay.models import ReasoningModel, ActionModel
+from relay.tools import Tool, ToolRegistry
 ```
 
 Avoid exposing internal graph nodes as primary public APIs.
@@ -3008,7 +3008,7 @@ pip install agent-runtime
 Then:
 
 ```python
-from agent_runtime import Agent
+from relay import Agent
 ```
 
 Development installation:

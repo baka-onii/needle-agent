@@ -1,11 +1,11 @@
 [project]
-name = "agent-runtime"
+name = "relay"
 version = "0.1.0"
-description = "Local-first natural-language agent runtime: reasoning LLM + Needle tool-calling model"
+description = "Relay: specialised lightweight local harness — reasoning LLM plus tool-calling action models"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Katorin", email = "anmolpoonam41@gmail.com" }]
-keywords = ["agent", "tool-calling", "llm", "langgraph", "needle", "local-first"]
+keywords = ["agent", "tool-calling", "llm", "langgraph", "relay", "local-first"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -35,20 +35,20 @@ dev = [
 browser = ["playwright>=1.50,<2"]
 
 [project.scripts]
-needle-agent = "agent_runtime.cli:main"
+relay = "relay.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/baka-onii/needle-agent"
-Repository = "https://github.com/baka-onii/needle-agent"
-Issues = "https://github.com/baka-onii/needle-agent/issues"
-Specification = "https://github.com/baka-onii/needle-agent/blob/main/docs/spec-v0.md"
+Homepage = "https://github.com/baka-onii/relay"
+Repository = "https://github.com/baka-onii/relay"
+Issues = "https://github.com/baka-onii/relay/issues"
+Specification = "https://github.com/baka-onii/relay/blob/main/docs/spec-v0.md"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agent_runtime"]
+packages = ["src/relay"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -61,7 +61,7 @@ line-length = 100
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"config/defaults.toml" = "agent_runtime/defaults/defaults.toml"
-"config/prompts/reasoning.md" = "agent_runtime/defaults/prompts/reasoning.md"
-"config/prompts/translator.md" = "agent_runtime/defaults/prompts/translator.md"
-"config/prompts/confirmation.md" = "agent_runtime/defaults/prompts/confirmation.md"
+"config/defaults.toml" = "relay/defaults/defaults.toml"
+"config/prompts/reasoning.md" = "relay/defaults/prompts/reasoning.md"
+"config/prompts/translator.md" = "relay/defaults/prompts/translator.md"
+"config/prompts/confirmation.md" = "relay/defaults/prompts/confirmation.md"

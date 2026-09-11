@@ -1,5 +1,5 @@
 @echo off
-rem Build llama-server (CUDA) for the Needle agent harness.
+rem Build llama-server (CUDA) for the Relay harness.
 rem Usage: scripts\build-llama-server.bat
 rem Env overrides: VSVARS (VsDevCmd.bat path), CUDAToolkit_ROOT, CMAKE_BIN, LLAMA_SRC_REF
 setlocal

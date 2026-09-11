@@ -10,7 +10,7 @@ def test_one_shot_cli():
         [
             sys.executable,
             "-m",
-            "agent_runtime",
+            "relay",
             "run",
             "--demo",
             "--json",
@@ -29,7 +29,7 @@ def test_one_shot_cli():
 
 def test_interactive_cli():
     result = subprocess.run(
-        [sys.executable, "-m", "agent_runtime", "chat", "--demo"],
+        [sys.executable, "-m", "relay", "chat", "--demo"],
         input="Calculate 2+2\n/new\n/tools\n/exit\n",
         capture_output=True,
         text=True,
@@ -45,7 +45,7 @@ def test_live_refuses_without_server_when_start_disabled(tmp_path):
         [
             sys.executable,
             "-m",
-            "agent_runtime",
+            "relay",
             "live",
             "--workspace",
             str(tmp_path),
@@ -63,12 +63,12 @@ def test_live_refuses_without_server_when_start_disabled(tmp_path):
 
 def test_live_requires_a_model_path(tmp_path, monkeypatch):
     monkeypatch.delenv("FG_GGUF", raising=False)
-    monkeypatch.setenv("NEEDLE_REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("RELAY_REPO_ROOT", str(tmp_path))
     result = subprocess.run(
         [
             sys.executable,
             "-m",
-            "agent_runtime",
+            "relay",
             "live",
             "--workspace",
             str(tmp_path),
@@ -86,7 +86,7 @@ def test_live_requires_a_model_path(tmp_path, monkeypatch):
 def test_live_finds_repo_server_and_model():
     import pytest
 
-    from agent_runtime import cli
+    from relay import cli
 
     server, gguf = cli._repo_llama_server(), cli._repo_gguf()
     if not server or not gguf:
@@ -96,7 +96,7 @@ def test_live_finds_repo_server_and_model():
 
 def test_live_help_advertises_cpu_default_and_gpu_flag():
     result = subprocess.run(
-        [sys.executable, "-m", "agent_runtime", "live", "--help"],
+        [sys.executable, "-m", "relay", "live", "--help"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -110,11 +110,11 @@ def test_invalid_workspace_has_friendly_error():
         [
             sys.executable,
             "-m",
-            "agent_runtime",
+            "relay",
             "run",
             "--demo",
             "--workspace",
-            "/nonexistent-needle-workspace",
+            "/nonexistent-relay-workspace",
             "hello",
         ],
         capture_output=True,
@@ -127,11 +127,11 @@ def test_invalid_workspace_has_friendly_error():
 
 
 def test_config_init_show_and_run(tmp_path):
-    from agent_runtime.config import parse_config
+    from relay.config import parse_config
 
-    path = tmp_path / "needle.toml"
+    path = tmp_path / "relay.toml"
     result = subprocess.run(
-        [sys.executable, "-m", "agent_runtime", "config", "init", str(path)],
+        [sys.executable, "-m", "relay", "config", "init", str(path)],
         capture_output=True,
         text=True,
         timeout=10,
@@ -142,7 +142,7 @@ def test_config_init_show_and_run(tmp_path):
         [
             sys.executable,
             "-m",
-            "agent_runtime",
+            "relay",
             "config",
             "show",
             "--config",
@@ -169,7 +169,7 @@ def test_config_init_show_and_run(tmp_path):
         [
             sys.executable,
             "-m",
-            "agent_runtime",
+            "relay",
             "run",
             "--config",
             str(portable),
@@ -188,14 +188,14 @@ def test_cli_prompt_files_and_bad_keys(tmp_path):
     prompt.write_text("CUSTOM CLI INSTRUCTIONS")
     for option in ("--reasoning-prompt", "--translator-prompt", "--confirmation-prompt"):
         result = subprocess.run(
-            [sys.executable, "-m", "agent_runtime", "config", "show", option, str(prompt)],
+            [sys.executable, "-m", "relay", "config", "show", option, str(prompt)],
             capture_output=True,
             text=True,
             timeout=10,
         )
         assert result.returncode == 0 and "CUSTOM CLI INSTRUCTIONS" in result.stdout
     result = subprocess.run(
-        [sys.executable, "-m", "agent_runtime", "run", "--demo", "--set", "max_stallz=4", "Hello"],
+        [sys.executable, "-m", "relay", "run", "--demo", "--set", "max_stallz=4", "Hello"],
         capture_output=True,
         text=True,
         timeout=10,
@@ -209,7 +209,7 @@ def test_cli_write_runs_without_approval(tmp_path):
         [
             sys.executable,
             "-m",
-            "agent_runtime",
+            "relay",
             "run",
             "--demo",
             "--workspace",

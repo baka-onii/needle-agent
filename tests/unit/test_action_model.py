@@ -6,11 +6,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from agent_runtime.config import AgentConfig
-from agent_runtime.models.needle import NeedleActionModel
-from agent_runtime.models.reasoning import LlamaServerReasoningModel, build_system_prompt
-from agent_runtime.tools.base import Tool
-from agent_runtime.tools.registry import create_default_registry
+from relay.config import AgentConfig
+from relay.models.needle import NeedleActionModel
+from relay.models.reasoning import LlamaServerReasoningModel, build_system_prompt
+from relay.tools.base import Tool
+from relay.tools.registry import create_default_registry
 
 
 class StubNeedleClient:
@@ -157,15 +157,15 @@ def test_tool_schema_is_needle_compatible() -> None:
     ],
 )
 def test_malformed_needle_output_is_not_repaired(response) -> None:
-    from agent_runtime.models.action import ActionOutputError
-    from agent_runtime.models.needle import parse_needle_response
+    from relay.models.action import ActionOutputError
+    from relay.models.needle import parse_needle_response
 
     with pytest.raises(ActionOutputError):
         parse_needle_response(response)
 
 
 def test_uncalibrated_needle_output_fails_closed() -> None:
-    from agent_runtime.models.needle import parse_needle_response
+    from relay.models.needle import parse_needle_response
 
     result = parse_needle_response(
         {
@@ -184,8 +184,8 @@ def test_v1_base_url_not_duplicated(server_url: str) -> None:
 
 
 def test_multiple_native_calls_are_rejected_as_non_atomic():
-    from agent_runtime.models.action import ActionOutputError
-    from agent_runtime.models.needle import parse_needle_response
+    from relay.models.action import ActionOutputError
+    from relay.models.needle import parse_needle_response
 
     with pytest.raises(ActionOutputError, match="multiple calls"):
         parse_needle_response(
@@ -221,7 +221,7 @@ class _CannedFunctionGemma:
     """FunctionGemma adapter with the HTTP layer replaced by canned outputs."""
 
     def __init__(self, tools, outputs):
-        from agent_runtime.models.functiongemma import FunctionGemmaActionModel
+        from relay.models.functiongemma import FunctionGemmaActionModel
 
         self.adapter = FunctionGemmaActionModel.__new__(FunctionGemmaActionModel)
         FunctionGemmaActionModel.__init__(self.adapter, tools)
@@ -267,7 +267,7 @@ def test_functiongemma_accepts_server_consumed_stop_token() -> None:
 
 
 def test_functiongemma_rejects_truncated_and_multiple_calls() -> None:
-    from agent_runtime.models.action import ActionOutputError
+    from relay.models.action import ActionOutputError
 
     tools = _fg_tools()
     for text, finished in (
@@ -286,7 +286,7 @@ def test_functiongemma_rejects_truncated_and_multiple_calls() -> None:
 
 
 def test_functiongemma_parses_bare_none_and_commas_in_values() -> None:
-    from agent_runtime.models.functiongemma import parse_function_call
+    from relay.models.functiongemma import parse_function_call
 
     name, arguments = parse_function_call(
         "<start_function_call>call:search_files{query:<escape>a, b<escape>,"
@@ -296,13 +296,13 @@ def test_functiongemma_parses_bare_none_and_commas_in_values() -> None:
 
 
 def test_functiongemma_render_parse_round_trip() -> None:
-    from agent_runtime import AgentConfig
-    from agent_runtime.models.functiongemma import (
+    from relay import AgentConfig
+    from relay.models.functiongemma import (
         _coerce_arguments,
         parse_function_call,
         render_function_call,
     )
-    from agent_runtime.tools.registry import create_default_registry
+    from relay.tools.registry import create_default_registry
 
     tools = {t.name: t for t in create_default_registry(AgentConfig()).list()}
     cases = [

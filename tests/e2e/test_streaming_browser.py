@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from agent_runtime import Agent, AgentConfig
-from agent_runtime.models.action import NeedleResult
-from agent_runtime.models.streaming import ModelDelta, check_cancelled
-from agent_runtime.server import WorkspaceService, make_server
+from relay import Agent, AgentConfig
+from relay.models.action import NeedleResult
+from relay.models.streaming import ModelDelta, check_cancelled
+from relay.server import WorkspaceService, make_server
 
 playwright = pytest.importorskip("playwright.sync_api")
 expect = playwright.expect
@@ -95,9 +95,9 @@ def streaming_page(tmp_path, request):
     thread.start()
     try:
         with playwright.sync_playwright() as p:
-            executable = os.getenv("NEEDLE_BROWSER_EXECUTABLE") or p.chromium.executable_path
+            executable = os.getenv("RELAY_BROWSER_EXECUTABLE") or p.chromium.executable_path
             if not Path(executable).is_file():
-                pytest.skip("Install Chromium or set NEEDLE_BROWSER_EXECUTABLE")
+                pytest.skip("Install Chromium or set RELAY_BROWSER_EXECUTABLE")
             browser = p.chromium.launch(
                 executable_path=executable,
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--no-zygote"],

@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from agent_runtime import AgentConfig
-from agent_runtime.execution.confidence import threshold_for
-from agent_runtime.models.functiongemma import _coerce_arguments
-from agent_runtime.tools.base import ToolError
-from agent_runtime.tools.editing import apply_unified_diff
-from agent_runtime.tools.registry import FORBIDDEN_TOOLS, create_default_registry
-from agent_runtime.tools.web import html_to_text, parse_duckduckgo, search_blocked
+from relay import AgentConfig
+from relay.execution.confidence import threshold_for
+from relay.models.functiongemma import _coerce_arguments
+from relay.tools.base import ToolError
+from relay.tools.editing import apply_unified_diff
+from relay.tools.registry import FORBIDDEN_TOOLS, create_default_registry
+from relay.tools.web import html_to_text, parse_duckduckgo, search_blocked
 
 REQUIRED = [
     "read_file", "read_directory", "search_files", "write_file", "file_info",
@@ -242,7 +242,7 @@ def test_payload_contracts_cover_exactly_the_bulk_text_tools(tmp_path: Path) -> 
 
 
 def test_approval_summary_names_tool_and_target(tmp_path: Path) -> None:
-    from agent_runtime.tools.base import ToolCall, approval_summary
+    from relay.tools.base import ToolCall, approval_summary
 
     assert (
         approval_summary(ToolCall(name="delete_file", arguments={"path": "a.txt"}))
@@ -255,8 +255,8 @@ def test_approval_summary_names_tool_and_target(tmp_path: Path) -> None:
 
 
 def test_approval_diff_covers_severe_tools(tmp_path: Path) -> None:
-    from agent_runtime.tools.base import ToolCall
-    from agent_runtime.tools.preview import approval_diff
+    from relay.tools.base import ToolCall
+    from relay.tools.preview import approval_diff
 
     config = AgentConfig(workspace_root=str(tmp_path))
     (tmp_path / "note.txt").write_text("line one\nline two\n")

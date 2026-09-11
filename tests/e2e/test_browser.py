@@ -1,6 +1,6 @@
 """Optional real-browser tests: uv sync --group browser; playwright install chromium.
 
-Set NEEDLE_BROWSER_EXECUTABLE to use an existing Chromium instead. No live LLM
+Set RELAY_BROWSER_EXECUTABLE to use an existing Chromium instead. No live LLM
 or API key is needed; the demo runs the same graph and real sandboxed tools.
 """
 
@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_runtime import Agent, AgentConfig
-from agent_runtime.server import WorkspaceService, make_server
+from relay import Agent, AgentConfig
+from relay.server import WorkspaceService, make_server
 
 playwright = pytest.importorskip("playwright.sync_api")
 expect = playwright.expect
@@ -27,7 +27,7 @@ def browser_page(tmp_path, request):
     )
     service = WorkspaceService(AgentConfig(workspace_root=str(root)), demo=True)
     if getattr(request, "param", None) == "selection-review":
-        from agent_runtime.models.action import NeedleResult
+        from relay.models.action import NeedleResult
 
         class ReviewReasoning:
             turn = 0
@@ -67,7 +67,7 @@ def browser_page(tmp_path, request):
     thread.start()
     try:
         with playwright.sync_playwright() as p:
-            executable = os.environ.get("NEEDLE_BROWSER_EXECUTABLE") or p.chromium.executable_path
+            executable = os.environ.get("RELAY_BROWSER_EXECUTABLE") or p.chromium.executable_path
             if not Path(executable).is_file():
                 pytest.skip("Install Chromium with: playwright install chromium")
             browser = p.chromium.launch(
@@ -128,7 +128,7 @@ def test_question_and_write_survive_reload(browser_page):
     expect(page.locator(".message-meta")).to_contain_text("3 tool steps")
     with page.expect_download() as download:
         page.get_by_role("button", name="Export trace").click()
-    assert download.value.suggested_filename.startswith("needle-run-")
+    assert download.value.suggested_filename.startswith("relay-run-")
 
 
 def test_write_completes_without_approval_and_cancellation(browser_page):

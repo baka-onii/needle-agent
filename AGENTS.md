@@ -5,7 +5,7 @@
   original V0 slice. Trust the specs over any other prose.
 
 ## Starting the harness
-- Terminal with the fine-tuned translator: `python -m agent_runtime live
+- Terminal with the fine-tuned translator: `python -m relay live
   --workspace <dir> --fg-gguf <model.gguf>` (add `--ui` for the browser GUI).
   The command starts `llama-server` with the GGUF if port 8081 is free and
   stops only servers it started itself. Reasoning model must already serve
@@ -20,6 +20,10 @@
   fine-tune is running in WSL — check `nvidia-smi` and running processes first.
 
 ## Stack
+- Product identity is **Relay** (`relay` package, CLI, `RELAY_*` env). **Needle**
+  denotes only the external action-model engine (`cactus-needle`, `NeedleResult`,
+  `needle_schema`, `needle_weights`/`needle_max_tokens`, `NEEDLE_*` engine vars).
+  Keep the distinction in code, docs, and UI copy.
 - Python `>=3.11,<3.14`. `pyproject.toml` with loose pins: `langgraph>=1.2,<1.3`,
   `pydantic>=2.13,<3`, `cactus-needle>=2.0,<3`. Dev: `pytest>=8,<9`,
   `pytest-asyncio>=1,<2`, `ruff>=0.12,<1`.
@@ -80,9 +84,9 @@
   original request + recent messages, drops old observations first. No summarization models.
 
 ## Structure
-- `src/agent_runtime/{agent.py,cli.py,server.py,store.py,config.py,state.py,models/{reasoning,action,needle,functiongemma,demo,streaming,tokens}.py,protocol/{parser,stream,intent}.py,tools/{base,registry,filesystem,editing,execution,git,web,environment,utility,interaction,preview}.py,execution/{sanitizer,validator,confidence,executor}.py,context/{manager,summarize}.py,graph/workflow.py,web/}`, `tests/{unit,integration,e2e}/`, `examples/basic.py`, `config/{defaults.toml,prompts/}`.
+- `src/relay/{agent.py,cli.py,server.py,store.py,config.py,state.py,models/{reasoning,action,needle,functiongemma,demo,streaming,tokens}.py,protocol/{parser,stream,intent}.py,tools/{base,registry,filesystem,editing,execution,git,web,environment,utility,interaction,preview}.py,execution/{sanitizer,validator,confidence,executor}.py,context/{manager,summarize}.py,graph/workflow.py,web/}`, `tests/{unit,integration,e2e}/`, `examples/basic.py`, `config/{defaults.toml,prompts/}`.
 - Browser sessions persist write-through to SQLite (`store.py`, default
-  `~/.needle/sessions.db`, `NEEDLE_SESSIONS_DB` override); per-token model
+  `~/.relay/sessions.db`, `RELAY_SESSIONS_DB` override); per-token model
   traces are never stored. Storage failures never break runs.
 - Do not split files further without concrete reason. Pydantic for external/model data (`ToolCall, ToolResult, NeedleResult+ToolRanking`); dataclasses for internal runtime objects.
 

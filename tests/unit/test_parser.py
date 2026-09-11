@@ -1,6 +1,6 @@
 """P3: protocol parser, including <content> payload blocks."""
 
-from agent_runtime.protocol.parser import parse_response
+from relay.protocol.parser import parse_response
 
 
 def _acts(parsed):

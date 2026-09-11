@@ -105,7 +105,7 @@ agent-runtime/
 ├── LICENSE
 │
 ├── src/
-│   └── agent_runtime/
+│   └── relay/
 │       ├── __init__.py
 │       ├── agent.py
 │       ├── config.py

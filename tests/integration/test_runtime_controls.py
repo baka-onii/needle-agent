@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from agent_runtime import Agent, AgentConfig, Tool, ToolRegistry
-from agent_runtime.models.action import NeedleResult
+from relay import Agent, AgentConfig, Tool, ToolRegistry
+from relay.models.action import NeedleResult
 
 
 class Reasoning:

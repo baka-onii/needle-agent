@@ -50,9 +50,9 @@ These fields are available in **Settings → Streaming & model conversation**, c
 files, and CLI overrides. Examples:
 
 ```sh
-needle-agent serve --config needle.toml --stream-buffer-ms 500
-needle-agent chat --config needle.toml --stream --trace
-needle-agent run --no-stream --no-capture-model-inputs 'Explain the project'
+relay serve --config relay.toml --stream-buffer-ms 500
+relay chat --config relay.toml --stream --trace
+relay run --no-stream --no-capture-model-inputs 'Explain the project'
 ```
 
 The buffer is **cosmetic**. Validation, tools, Stop, questions, and write approval never wait
@@ -97,8 +97,8 @@ normal iterator exhaustion means successful completion. Raise an error for incom
 output, or yield a non-success `finish_reason` (such as `length`), which the runtime rejects.
 
 ```python
-from agent_runtime import ModelDelta
-from agent_runtime.models.streaming import check_cancelled
+from relay import ModelDelta
+from relay.models.streaming import check_cancelled
 
 class MyStreamingAdapter:
     def stream(self, messages, *, cancelled=None):

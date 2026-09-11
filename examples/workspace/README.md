@@ -9,6 +9,6 @@ A small, local-first project for collecting and organizing research notes.
 - `config.json` — project settings and enabled features.
 - `data/activity.csv` — a tiny sample activity report.
 
-This is a safe example workspace for the Needle agent. Try searching for
+This is a safe example workspace for the Relay agent. Try searching for
 "authentication", reading a file, or creating a note. Writes need your approval
 in the browser. Everything stays inside this workspace.

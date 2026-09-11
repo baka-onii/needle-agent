@@ -1,9 +1,9 @@
 """P1: core models, Tool definition, config, state."""
 
-from agent_runtime.config import AgentConfig
-from agent_runtime.models.action import NeedleResult, ToolRanking
-from agent_runtime.state import create_initial_state
-from agent_runtime.tools.base import Tool, ToolCall, ToolResult
+from relay.config import AgentConfig
+from relay.models.action import NeedleResult, ToolRanking
+from relay.state import create_initial_state
+from relay.tools.base import Tool, ToolCall, ToolResult
 
 
 def test_tool_call_defaults() -> None:

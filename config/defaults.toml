@@ -1,4 +1,4 @@
-# Canonical defaults. Copy with `needle-agent config init needle.toml`.
+# Canonical defaults. Copy with `relay config init relay.toml`.
 # Paths in a user config are relative to that config file, not the shell's cwd.
 [runtime]
 confidence_threshold = 0.85
@@ -61,7 +61,7 @@ require_approval_for = [
     "delete_text",
     "apply_patch",
 ]
-# API keys belong in NEEDLE_LLM_API_KEY, not in this file.
+# API keys belong in RELAY_LLM_API_KEY, not in this file.
 # Custom weights may be set using NEEDLE_WEIGHTS or --set needle_weights=PATH.
 
 [streaming]

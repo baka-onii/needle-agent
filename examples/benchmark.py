@@ -15,11 +15,11 @@ import tempfile
 import time
 from pathlib import Path
 
-from agent_runtime import Agent, AgentConfig, ToolCall, ToolError
-from agent_runtime.execution.executor import execute
-from agent_runtime.execution.validator import validate
-from agent_runtime.models.reasoning import OpenAICompatibleReasoningModel
-from agent_runtime.tools.registry import create_default_registry
+from relay import Agent, AgentConfig, ToolCall, ToolError
+from relay.execution.executor import execute
+from relay.execution.validator import validate
+from relay.models.reasoning import OpenAICompatibleReasoningModel
+from relay.tools.registry import create_default_registry
 
 TASKS = {
     "read": {"prompt": "Read config.py and tell me the auth backend.", "evidence": "local"},
@@ -187,9 +187,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out", default=".cache/bench_results.jsonl")
     parser.add_argument("--workroot", default=None, help="Parent for new temporary workspaces")
     parser.add_argument(
-        "--base-url", default=os.getenv("NEEDLE_LLM_BASE_URL", "http://127.0.0.1:8080")
+        "--base-url", default=os.getenv("RELAY_LLM_BASE_URL", "http://127.0.0.1:8080")
     )
-    parser.add_argument("--model", default=os.getenv("NEEDLE_LLM_MODEL", "ornith"))
+    parser.add_argument("--model", default=os.getenv("RELAY_LLM_MODEL", "ornith"))
     parser.add_argument("--max-steps", type=int, default=8)
     parser.add_argument("--repeats", type=int, default=1)
     args = parser.parse_args(argv)
@@ -206,7 +206,7 @@ def main(argv: list[str] | None = None) -> None:
         for task_id in task_ids:
             for path, runner in (("native", run_native), ("lifted", run_lifted)):
                 with tempfile.TemporaryDirectory(
-                    prefix=f"needle-{task_id}-{path}-", dir=args.workroot
+                    prefix=f"relay-{task_id}-{path}-", dir=args.workroot
                 ) as tmp:
                     root = Path(tmp)
                     _setup_task(root, task_id)
@@ -214,7 +214,7 @@ def main(argv: list[str] | None = None) -> None:
                         workspace_root=str(root),
                         llm_base_url=args.base_url,
                         llm_model=args.model,
-                        llm_api_key=os.getenv("NEEDLE_LLM_API_KEY"),
+                        llm_api_key=os.getenv("RELAY_LLM_API_KEY"),
                         max_tool_steps=args.max_steps,
                         llm_max_tokens=512,
                         needle_weights=os.getenv("NEEDLE_WEIGHTS"),

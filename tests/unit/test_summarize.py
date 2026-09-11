@@ -1,6 +1,6 @@
 """Structured compression: shape validation and thresholds."""
 
-from agent_runtime.context.summarize import (
+from relay.context.summarize import (
     parse_summary,
     render_summary,
     should_compress,

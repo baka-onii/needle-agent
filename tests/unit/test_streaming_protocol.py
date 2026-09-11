@@ -2,9 +2,9 @@
 
 import pytest
 
-from agent_runtime.protocol.intent import write_action
-from agent_runtime.protocol.parser import parse_response
-from agent_runtime.protocol.stream import ResponseStream
+from relay.protocol.intent import write_action
+from relay.protocol.parser import parse_response
+from relay.protocol.stream import ResponseStream
 
 CASES = [
     ("Hello, world.", [("text", "Hello, world.")]),

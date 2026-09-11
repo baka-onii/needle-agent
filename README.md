@@ -1,12 +1,17 @@
-# Needle · Agent workspace
+# Relay · Specialised Lightweight Local Harness
 
-A local-first agent that **reasons in natural language and acts through validated tools**.
-Your reasoning model emits `<tool>` / `<final>` text. Needle 2 translates an action into
-one tool call. This runtime—not either model—owns validation, confidence, permissions,
-execution, and the next reasoning turn.
+A local-first agent harness that **reasons in natural language and acts through validated tools**.
+Your reasoning model emits `<tool>` / `<final>` text. A small action model — Needle 2 or a
+fine-tuned FunctionGemma — translates each action into one tool call. This runtime, not either
+model, owns validation, confidence, permissions, execution, and the next reasoning turn.
 
 **Interact through the browser, a terminal conversation, or the Python API.**
 Full architecture: [V0 specification](docs/spec-v0.md).
+
+> **Relay is the harness, not the model.** Needle (via `cactus-needle`) remains one of two
+> supported action-model translators, alongside the fine-tuned FunctionGemma server. Nothing
+> about the Needle engine, its schemas, or its weights changed names — only the product,
+> package (`relay`), CLI, and environment around it did.
 
 ## Try it now — no model or API key needed
 
@@ -15,7 +20,7 @@ No Node.js, frontend build, or extra web framework is required.
 
 ```sh
 uv sync --locked
-uv run needle-agent serve --demo --workspace examples/workspace
+uv run relay serve --demo --workspace examples/workspace
 ```
 
 Open **http://localhost:3000**. Try:
@@ -28,11 +33,11 @@ Open **http://localhost:3000**. Try:
 > **Demo is not live AI.** Its deterministic planner and translator simulate the model
 > interfaces and use explicitly synthetic confidence scores. Filesystem operations,
 > arithmetic, time, the LangGraph loop, validation, approvals, and cancellation are real.
-> Use live mode below for open-ended reasoning and actual Needle inference. There is
+> Use live mode below for open-ended reasoning and actual translator inference. There is
 > **no silent fallback** from live mode to the demo.
 
 Prefer pip? Create and activate a virtual environment, then run `python -m pip install -e .`.
-Use `python -m agent_runtime` in place of `uv run needle-agent`. On Windows, activate with
+Use `python -m relay` in place of `uv run relay`. On Windows, activate with
 `.venv\Scripts\Activate.ps1`; on macOS/Linux, use `source .venv/bin/activate`.
 
 ## Use real models
@@ -44,14 +49,14 @@ Ollama example, on the **same machine as the Python runtime**:
 ```sh
 ollama pull qwen2.5:3b
 # Start `ollama serve` if Ollama is not already running.
-uv run needle-agent serve --workspace examples/workspace \
+uv run relay serve --workspace examples/workspace \
   --base-url http://127.0.0.1:11434/v1 --model qwen2.5:3b
 ```
 
 Or use your existing llama.cpp / Ornith server:
 
 ```sh
-uv run needle-agent serve --workspace /path/to/project --base-url http://127.0.0.1:8080 --model ornith
+uv run relay serve --workspace /path/to/project --base-url http://127.0.0.1:8080 --model ornith
 ```
 
 Both bare server URLs and URLs ending in `/v1` are supported. A hosted compatible
@@ -60,24 +65,27 @@ browser setting or repository file:
 
 | Environment variable | Purpose |
 | --- | --- |
-| `NEEDLE_CONFIG` | Explicit TOML/JSON configuration file |
-| `NEEDLE_WORKSPACE` | Default filesystem root; otherwise the current directory |
-| `NEEDLE_LLM_BASE_URL` | Reasoning server base URL |
-| `NEEDLE_LLM_MODEL` | Model ID accepted by that server |
-| `NEEDLE_LLM_API_KEY` | Optional bearer API key; never sent to the browser |
-| `NEEDLE_WEIGHTS` | Optional custom `.cact` weights |
+| `RELAY_CONFIG` | Explicit TOML/JSON configuration file |
+| `RELAY_WORKSPACE` | Default filesystem root; otherwise the current directory |
+| `RELAY_LLM_BASE_URL` | Reasoning server base URL |
+| `RELAY_LLM_MODEL` | Model ID accepted by that server |
+| `RELAY_LLM_API_KEY` | Optional bearer API key; never sent to the browser |
+| `RELAY_ACTION_MODEL` | `needle` (default) or `functiongemma` |
+| `RELAY_FG_BASE_URL` | FunctionGemma translator server URL |
+| `RELAY_SESSIONS_DB` | SQLite backup path (default `~/.relay/sessions.db`) |
+| `NEEDLE_WEIGHTS` | Optional custom `.cact` weights for the Needle engine |
 | `NEEDLE_LIB_PATH` | Needle 2 shared library for offline installation |
 
 If an API key is configured, browser settings cannot redirect it to a different
-origin. Set `NEEDLE_LLM_BASE_URL` on the server and restart to switch providers.
+origin. Set `RELAY_LLM_BASE_URL` on the server and restart to switch providers.
 The HTTP adapter also rejects redirects rather than forwarding credentials.
 
 In the browser, **Settings → Live models → Test connection** checks `/v1/models`
-and initializes Needle. Save the settings, then send a message. Changing settings
+and initializes the action model. Save the settings, then send a message. Changing settings
 while a run is active is blocked. Settings and histories are isolated per browser session.
 
 
-### 2. Let Needle initialize
+### 2. Let the action model initialize
 
 `cactus-needle` downloads its small platform-specific inference engine from Hugging Face
 on first use and caches it. Internet access is needed for that first download. Subsequent
@@ -93,6 +101,47 @@ Custom Needle weights currently return uncalibrated confidence. Missing confiden
 treated as zero rather than invented; default gates therefore prevent execution. Do not
 lower confidence gates just to hide model failures.
 
+### 3. Or run the fine-tuned FunctionGemma translator
+
+One command starts the translator server (CPU by default — the 270M model answers in
+~0.6s without touching the GPU) and opens the harness:
+
+```sh
+# GGUF auto-detected from models/; server reused if :8081 is already up
+uv run relay live --workspace /path/to/project --ui
+uv run relay live --workspace /path/to/project --fg-gguf models/fg-tools.gguf
+```
+
+Add `--gpu-translator` to offload it with `-ngl all`. Fresh-clone translator setup:
+`scripts/build-llama-server.bat` (Windows) or `.sh` (Linux) builds only the
+`llama-server` target into `third_party/` (git-ignored); drop the GGUF in `models/`
+(git-ignored; `--fg-gguf` / `FG_GGUF` override). Never build or serve while a
+fine-tune is running on the same GPU.
+
+## What Relay can do now
+
+- **33 tools** across filesystem, editing, execution (`run_python`, `run_process`,
+  `run_powershell`), git, web, environment, utility, and interaction — one canonical
+  definition each, with model descriptions, translator schemas, and validation derived.
+- **Payload blocks**: bulk text travels in `<content>` / `<text-N>` blocks, attached
+  positionally by the runtime; translators only select tool + small args. Training
+  placeholders (`__PAYLOAD_*__`) fail closed instead of executing.
+- **Tiered approvals**: severe actions pause for permission with a rendered diff preview;
+  you can **edit arguments inline and approve the edited call** (re-validated, re-gated).
+  Session-only quick presets (commands / Python / git) beside the model chip; everything
+  else — reads, simple writes, stage — runs freely.
+- **Real context accounting**: per-server tokenizers (llama.cpp, Ollama, heuristic
+  fallback), a live tokens/chars meter above the composer, and structured compression
+  past ~80%: history folds into a validated `task/constraints/completed/current/files/
+  decisions/blockers` snapshot instead of dropping observations.
+- **Persistent state**: multi-step work lives in workspace-root `tasks.md` (model-kept);
+  browser sessions persist write-through to SQLite (`~/.relay/sessions.db`) — conversations
+  survive restarts, per-token traces never stored.
+- **Workspace UI**: resizable/collapsible sidebars with icon-rail mode, approval cards with
+  diffs, execution-policy readout, light/dark themes plus custom UI/accent colors, run
+  history with exportable traces, per-run inspector (pipeline, activity, model I/O).
+- **Terminal**: `serve`, `chat`, `run`, and `live` commands with `--trace`/`--json`,
+  interactive approval prompts, and `/new`, `/tools`, `/exit`.
 
 ## What you can interact with
 
@@ -103,9 +152,10 @@ lower confidence gates just to hide model failures.
 - **Tools:** inspect all thirty-three canonical definitions and their validation schemas.
 - **Run history:** real outcomes, step counts, durations, and downloadable JSON traces.
 - **Settings:** editable reasoning/translator/confirmation prompts, model generation budgets,
-  confidence thresholds, retry/context/search limits, read-only mode, and config import/export.
+  confidence thresholds, retry/context/search limits, read-only mode, appearance colors,
+  and config import/export.
 - **Appearance:** light/dark switch in the top bar; follows your system until you choose a theme,
-  then remembers that choice across reloads.
+  then remembers that choice across reloads. Custom base/accent colors persist locally.
 - **Chat management:** delete a conversation with its sidebar trash button. Confirmation is
   required; its messages and run traces are removed, **not workspace files**. Active runs must
   finish or be stopped first.
@@ -116,41 +166,22 @@ Reloading the browser reconnects to active runs, including pending questions/app
 ### Terminal
 
 ```sh
-uv run needle-agent chat --demo --workspace examples/workspace --trace
-uv run needle-agent run --demo 'Calculate 2 * (15 + 3)' --json
+uv run relay chat --demo --workspace examples/workspace --trace
+uv run relay run --demo 'Calculate 2 * (15 + 3)' --json
 
 # Live terminal conversation
-uv run needle-agent chat --workspace /path/to/project --base-url http://127.0.0.1:11434/v1 --model qwen2.5:3b --trace
+uv run relay chat --workspace /path/to/project --base-url http://127.0.0.1:11434/v1 --model qwen2.5:3b --trace
 
 # One command: translator server (fine-tuned GGUF) + live harness
-uv run needle-agent live --workspace /path/to/project --fg-gguf models/fg-tools.gguf
-uv run needle-agent live --workspace /path/to/project --fg-gguf models/fg-tools.gguf --ui  # browser GUI
+uv run relay live --workspace /path/to/project --fg-gguf models/fg-tools.gguf
+uv run relay live --workspace /path/to/project --fg-gguf models/fg-tools.gguf --ui  # browser GUI
 ```
-
-### Fine-tuned translator (FunctionGemma) setup
-
-Fresh clone to working harness, four steps:
-
-```sh
-# 1. Build llama-server with CUDA (Windows: scripts\build-llama-server.bat,
-#    Linux: scripts/build-llama-server.sh). Needs VS Build Tools / gcc,
-#    a CUDA toolkit, cmake, and ninja. Only the llama-server target builds.
-# 2. Place the fine-tuned translator GGUF at models/fg-tools.gguf
-#    (weights are git-ignored; --fg-gguf / FG_GGUF override the default).
-# 3. Start your reasoning server (Ollama / llama.cpp / Ornith on :8080).
-# 4. Run it — the translator server starts automatically on :8081:
-uv run needle-agent live --workspace /path/to/project --ui
-```
-
-`live` resolves everything repo-relative: `third_party/llama.cpp/build/bin/llama-server`
-(preferring `--llama-server` / `LLAMA_SERVER`), and the first `models/*.gguf`.
-It reuses a server already listening on `--fg-port` and only stops servers it
-started itself. Never build or serve while a fine-tune is running on the same GPU.
 
 Terminal commands: `/new` (reset conversation), `/tools`, `/exit`. Both terminal and web
 interfaces ask permission before severe actions (deletion, code execution, text
-edits, commits); simple writes run freely. Library callers can inject their own
-approval policy. Recoverable tool errors become observations; internal errors stop the run.
+edits, commits); simple writes run freely. Approval cards show what would change and
+accept edited arguments. Library callers can inject their own approval policy.
+Recoverable tool errors become observations; internal errors stop the run.
 
 ### Configuration files, prompts, and CLI overrides
 
@@ -158,21 +189,21 @@ Defaults now live in **`config/defaults.toml`** and **`config/prompts/*.md`**, n
 system-prompt strings. They are also bundled into the installed package. Create your own copy:
 
 ```sh
-uv run needle-agent config init needle.toml
-# Edit needle.toml and prompts/{reasoning,translator,confirmation}.md.
-uv run needle-agent serve --config needle.toml --workspace examples/workspace --demo
+uv run relay config init relay.toml
+# Edit relay.toml and prompts/{reasoning,translator,confirmation}.md.
+uv run relay serve --config relay.toml --workspace examples/workspace --demo
 
 # Individual prompt files and numeric overrides work with run, chat, and serve.
-uv run needle-agent chat --config needle.toml --reasoning-prompt prompts/reasoning.md \
+uv run relay chat --config relay.toml --reasoning-prompt prompts/reasoning.md \
   --llm-max-tokens 4096 --needle-max-tokens 4096 --set max_search_results=25
 
 # Resolve file references into a portable config with inline prompts (no API keys).
-uv run needle-agent config show --config needle.toml > portable.toml
+uv run relay config show --config relay.toml > portable.toml
 ```
 
 Precedence: **packaged defaults → explicit config → environment → CLI overrides**.
 File-relative paths resolve beside the config file. Workspace config files are **not**
-auto-discovered or silently trusted; use `--config` or `NEEDLE_CONFIG`. File changes take
+auto-discovered or silently trusted; use `--config` or `RELAY_CONFIG`. File changes take
 effect when reloaded/restarted. UI changes apply to the next run and stay session-local;
 export them to survive a server restart. The UI can import the portable file above but
 cannot read arbitrary server-side prompt paths or change the server's workspace/weights.
@@ -181,7 +212,7 @@ See [Configuration reference](docs/configuration.md) for fields, bounds, and exa
 ### Python API
 
 ```python
-from agent_runtime import Agent, AgentConfig
+from relay import Agent, AgentConfig
 
 config = AgentConfig(workspace_root="examples/workspace")
 with Agent(config, approve_fn=lambda call: False) as agent:  # deny writes in this example
@@ -194,15 +225,17 @@ with Agent(config, approve_fn=lambda call: False) as agent:  # deny writes in th
 
 Supply `reasoning=` and `action=` to replace either model without changing the graph.
 `ReasoningModel.generate(messages)` returns text; `ActionModel.translate(action, tools)`
-returns `NeedleResult`. `ask_fn` abstracts human input. Dependencies stay outside the
+returns `NeedleResult`. `ask_fn` abstracts human input; `approve_fn` may return an edited
+`ToolCall` to approve modified arguments. Dependencies stay outside the
 plain-data `AgentState`.
 
 For streaming, iterate `agent.stream(request, history=...)`. Model calls emit `model_start`,
 `model_status`, `model_delta`, and `model_end`, alongside the existing `phase`, `action`,
 `translation`, `validated`, `confidence`, `confirmation`, `safety`, `tool_start`, `tool_result`,
-and `rejected` events. The last `complete` event contains the terminal `state`. Alternatively,
-pass `on_event=` to `run()`. A thread-safe `cancelled=` predicate stops an active HTTP stream
-and prevents subsequent tools. Closing a stream alone does not constitute cancellation.
+`context_compressed`, and `rejected` events. The last `complete` event contains the terminal
+`state`. Alternatively, pass `on_event=` to `run()`. A thread-safe `cancelled=` predicate stops
+an active HTTP stream and prevents subsequent tools. Closing a stream alone does not
+constitute cancellation.
 
 ### Live model output in the chat
 
@@ -227,7 +260,7 @@ animation. Reconnecting restores the received prefix without replaying it token 
 
 Streaming is enabled by default for compatible reasoning servers. If a server returns JSON
 instead of SSE, it is labelled **buffered**. If it rejects streaming altogether, disable it
-with **Settings** or `--no-stream`; requests are not silently retried. Needle's current
+with **Settings** or `--no-stream`; requests are not silently retried. The Needle adapter's
 single-turn `complete()` API returns a whole translation, so that output is shown honestly
 as buffered rather than inventing token events. The offline demo explicitly simulates delivery.
 No unavailable/private reasoning is fabricated or requested; only text returned by the adapter
@@ -252,7 +285,7 @@ with no explicit literal payload and rejects translated content that differs fro
 Fences preserve indentation, blank lines, and literal protocol tags. A longer fence can contain
 triple backticks. The newline immediately before the closing fence is a delimiter; include an
 extra newline if the file should end with one. A small output budget may truncate long payloads:
-reasoning now defaults to **4,096** output tokens and Needle to **2,048**, both configurable.
+reasoning defaults to **4,096** output tokens and the action model to **256**, both configurable.
 
 Both models receive the real workspace root and a bounded directory snapshot. Use **`.`** for
 that root, never guessed aliases such as `root` or `user/home`. Nested directory observations
@@ -289,18 +322,21 @@ REASON → PARSE → TRANSLATE → SANITIZE → VALIDATE → CONFIDENCE
 - Invalid calls do not reach confidence or execution, regardless of their score.
 - Read/search/calculate/time clear **0.50** by default; write/ask clear **0.85**.
 - Defaults: **20 tool steps**, **3 consecutive non-executing turns**, **20,000 characters**
-  per tool output, **32,000 characters** of model context, and at most **2 attempts** at an
+  per tool output, **32,000 characters / 65,536 tokens** of model context (tokens when the
+  server tokenizer resolves), and at most **2 attempts** at an
   identical failing tool call before it is blocked. These limits are configurable.
-- The full system prompt, canonical tool descriptions, and original/current requests stay
-  pinned. Older observations are dropped first; oversized recent output is truncated.
+- Past ~80% of budget, history folds into a validated structured summary (task,
+  constraints, completed, current subtask, files, decisions, blockers) plus the live
+  request; malformed summaries fall back to observation-first trimming, never install.
   Requests that cannot fit the pinned budget are rejected rather than exceeding it.
 - Filesystem tools reject traversal, outside absolute paths, symlink escapes, and `.git`
   metadata. Reads are bounded; search skips generated directories, NUL-byte binaries,
   and files over **2 MB**, returning at most **50 matches** with line numbers/context.
 - Calculator input is a restricted, resource-bounded AST; it never uses `eval`.
-- No shell, terminal, arbitrary Python execution, append, binary write, or delete tool.
-- Parent-directory creation is **off** unless explicitly enabled. `--read-only` enforces
-  a server-side floor which browser settings cannot remove.
+- Execution tools (Python, processes, PowerShell), deletion, text edits, and commits pause
+  for approval under tiered `require_approval_for` tiers; reads, simple writes, moves,
+  and staging run freely. Parent-directory creation is **off** unless explicitly enabled.
+  `--read-only` enforces a server-side floor which browser settings cannot remove.
 - Needle calls are serialized around its process-global C engine. Each translation resets
   its session and uses **`complete()` only**, never Needle's agent loop.
 
@@ -319,9 +355,10 @@ matches user intent; review write approvals. Cancellation prevents subsequent op
 but cannot undo a write. Connected HTTP streams are interrupted on Stop; initial connection
 work, generate-only adapters, and Needle's blocking C-engine call remain cooperative.
 
-Conversations/runs live **in server memory**, expire after two hours of inactivity, and
-reset on server restart. Histories are bounded (24 conversations / 60 runs per session).
-Export traces to retain them. Deleting a chat also deletes its stored runs and traces.
+Conversations persist write-through to SQLite (`~/.relay/sessions.db`, overridable),
+expire after two hours of inactivity, and are bounded (24 conversations / 60 runs per
+session). Per-token model traces are never stored. Export traces to retain them. Deleting
+a chat also deletes its stored runs and traces.
 Browser tokens and your theme choice are stored locally; model keys are not. Model input
 traces can contain workspace/file content. Disable `capture_model_inputs` for new runs if you
 do not want their sent messages retained. Each run caps additional model trace details at
@@ -345,18 +382,19 @@ uv run --group browser playwright install chromium
 uv run --group browser pytest tests/e2e
 ```
 
-`NEEDLE_BROWSER_EXECUTABLE` can point to an existing Chromium installation. The tests cover
-real tool loops, strict Needle result parsing, schema validation, path/symlink safety,
-context budgets, long runs, SSE recovery, session isolation, approval/denial, cancellation,
+`RELAY_BROWSER_EXECUTABLE` can point to an existing Chromium installation. The tests cover
+real tool loops, strict translator result parsing, schema validation, path/symlink safety,
+token budgets, structured compression, approval/denial/editing, cancellation,
 CLI configuration, exact write payloads, selection reviews, repeated-interaction guards,
-configuration import/export, chat deletion, light/dark/mobile layouts, untrusted-content
-rendering, true HTTP/SSE delivery, split tags, partial code blocks, stream cancellation,
-replay, adaptive pacing, stable reasoning panels, and explicit live-backend errors.
+configuration import/export, SQLite persistence, chat deletion, light/dark/mobile layouts,
+untrusted-content rendering, true HTTP/SSE delivery, split tags, partial code blocks, stream
+cancellation, replay, adaptive pacing, stable reasoning panels, and explicit live-backend errors.
 No test requires model weights or an API key.
 
 `uv.lock` records the resolved dependency versions. The frontend ships as static package
 assets. Core dependencies remain LangGraph, Pydantic, and cactus-needle (plus timezone data
-on Windows). HTTP, filesystem/search, arithmetic, and server orchestration use the stdlib.
+on Windows). HTTP, filesystem/search, arithmetic, tokenizers, SQLite, and server
+orchestration use the stdlib.
 
 ### Benchmark
 

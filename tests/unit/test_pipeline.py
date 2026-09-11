@@ -2,18 +2,18 @@
 
 import pytest
 
-from agent_runtime.config import AgentConfig
-from agent_runtime.execution.confidence import (
+from relay.config import AgentConfig
+from relay.execution.confidence import (
     is_confident,
     low_confidence_message,
     threshold_for,
 )
-from agent_runtime.execution.executor import execute
-from agent_runtime.execution.sanitizer import sanitize
-from agent_runtime.execution.validator import validate
-from agent_runtime.models.action import NeedleResult, ToolRanking
-from agent_runtime.tools.base import Tool, ToolCall, ToolError
-from agent_runtime.tools.registry import create_default_registry
+from relay.execution.executor import execute
+from relay.execution.sanitizer import sanitize
+from relay.execution.validator import validate
+from relay.models.action import NeedleResult, ToolRanking
+from relay.tools.base import Tool, ToolCall, ToolError
+from relay.tools.registry import create_default_registry
 
 
 @pytest.fixture()

@@ -10,10 +10,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from agent_runtime import Agent, AgentConfig
-from agent_runtime.models.needle import NeedleActionModel
-from agent_runtime.models.reasoning import OpenAICompatibleReasoningModel
-from agent_runtime.tools.registry import create_default_registry
+from relay import Agent, AgentConfig
+from relay.models.needle import NeedleActionModel
+from relay.models.reasoning import OpenAICompatibleReasoningModel
+from relay.tools.registry import create_default_registry
 
 
 @pytest.fixture()

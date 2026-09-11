@@ -5,11 +5,11 @@ from typing import Any
 
 import pytest
 
-from agent_runtime.agent import Agent
-from agent_runtime.config import AgentConfig
-from agent_runtime.models.action import NeedleResult, ToolRanking
-from agent_runtime.tools.base import Tool
-from agent_runtime.tools.registry import create_default_registry
+from relay.agent import Agent
+from relay.config import AgentConfig
+from relay.models.action import NeedleResult, ToolRanking
+from relay.tools.base import Tool
+from relay.tools.registry import create_default_registry
 
 
 class ScriptedReasoning:
@@ -420,7 +420,7 @@ def test_translator_placeholder_never_executes(workspace: Path) -> None:
 
 
 def test_approval_with_edited_arguments_executes_the_edit(workspace: Path) -> None:
-    from agent_runtime.tools.base import ToolCall
+    from relay.tools.base import ToolCall
 
     reasoning = ScriptedReasoning(
         ["<tool>Use run_python to run code.</tool>", "<final>Ran it.</final>"]
@@ -507,7 +507,7 @@ def test_loop_compresses_past_threshold(workspace: Path) -> None:
         }
     )
     agent = _agent(
-        workspace, reasoning, action, max_context_chars=12000, max_context_tokens=100000
+        workspace, reasoning, action, max_context_chars=12000, max_context_tokens=100000, llm_base_url="http://127.0.0.1:1"
     )
     events = list(agent.stream("Calculate 1+1", history=_big_history()))
     compressed = [e for e in events if e.get("type") == "context_compressed"]
@@ -535,7 +535,7 @@ def test_loop_skips_compression_when_summary_unusable(workspace: Path) -> None:
         }
     )
     agent = _agent(
-        workspace, reasoning, action, max_context_chars=12000, max_context_tokens=100000
+        workspace, reasoning, action, max_context_chars=12000, max_context_tokens=100000, llm_base_url="http://127.0.0.1:1"
     )
     events = list(agent.stream("Calculate 1+1", history=_big_history()))
     assert any(e.get("type") == "context_compression_skipped" for e in events)

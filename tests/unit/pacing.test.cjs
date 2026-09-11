@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { PacedText } = require("../../src/agent_runtime/web/stream.js");
+const { PacedText } = require("../../src/relay/web/stream.js");
 
 test("initial buffer, measured delivery, and bounded terminal catch-up", () => {
   const stream = new PacedText({ bufferMs: 1000, maxLagMs: 1800 });

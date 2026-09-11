@@ -5,16 +5,16 @@ from dataclasses import replace
 
 import pytest
 
-from agent_runtime import AgentConfig
-from agent_runtime.config import export_config, init_config, load_config, parse_config
-from agent_runtime.models.reasoning import build_system_prompt, build_translator_prompt
-from agent_runtime.protocol.intent import check_atomic_action, literal_write_content, write_action
-from agent_runtime.protocol.parser import parse_response
-from agent_runtime.tools.registry import create_default_registry
+from relay import AgentConfig
+from relay.config import export_config, init_config, load_config, parse_config
+from relay.models.reasoning import build_system_prompt, build_translator_prompt
+from relay.protocol.intent import check_atomic_action, literal_write_content, write_action
+from relay.protocol.parser import parse_response
+from relay.tools.registry import create_default_registry
 
 
 def test_init_loads_relative_workspace_and_prompt_files(tmp_path, monkeypatch):
-    destination = init_config(tmp_path / "settings" / "needle.toml")
+    destination = init_config(tmp_path / "settings" / "relay.toml")
     prompt = destination.parent / "prompts" / "reasoning.md"
     prompt.write_text("Use concise, careful reasoning.")
     monkeypatch.chdir(tmp_path)
@@ -32,9 +32,9 @@ def test_config_environment_explicit_override_precedence(tmp_path):
     path = tmp_path / "settings.toml"
     path.write_text('[models]\nllm_model = "from-file"\n[runtime]\nmax_tool_steps = 7\n')
     env = {
-        "NEEDLE_CONFIG": str(path),
-        "NEEDLE_LLM_MODEL": "from-env",
-        "NEEDLE_LLM_API_KEY": "secret",
+        "RELAY_CONFIG": str(path),
+        "RELAY_LLM_MODEL": "from-env",
+        "RELAY_LLM_API_KEY": "secret",
     }
     assert load_config(environ=env).llm_model == "from-env"
     config = load_config(overrides={"llm_model": "from-cli"}, environ=env)
@@ -43,7 +43,7 @@ def test_config_environment_explicit_override_precedence(tmp_path):
 
 
 def test_workspace_configuration_is_never_implicitly_trusted(tmp_path, monkeypatch):
-    (tmp_path / "needle.toml").write_text('[models]\nllm_model = "untrusted"\n')
+    (tmp_path / "relay.toml").write_text('[models]\nllm_model = "untrusted"\n')
     monkeypatch.chdir(tmp_path)
     assert load_config(environ={}).llm_model == AgentConfig().llm_model
 
@@ -133,14 +133,14 @@ def test_fenced_payload_may_close_next_to_outer_tag():
 
 
 def test_approval_tier_defaults_and_validation(tmp_path):
-    from agent_runtime.config import load_config
+    from relay.config import load_config
 
     config = AgentConfig()
     assert "delete_file" in config.require_approval_for
     assert "run_python" in config.require_approval_for
     assert "write_file" not in config.require_approval_for
     assert "read_file" not in config.require_approval_for
-    path = tmp_path / "needle.toml"
+    path = tmp_path / "relay.toml"
     path.write_text('[safety]\nrequire_approval_for = ["delete_file"]\n')
     assert load_config(path, environ={}).require_approval_for == ("delete_file",)
     path.write_text('[safety]\nrequire_approval_for = [""]\n')
@@ -149,7 +149,7 @@ def test_approval_tier_defaults_and_validation(tmp_path):
 
 
 def test_reasoning_prompt_documents_payload_contracts():
-    from agent_runtime.models.reasoning import build_system_prompt
+    from relay.models.reasoning import build_system_prompt
 
     tools = create_default_registry(AgentConfig()).list()
     prompt = build_system_prompt(tools)
@@ -166,7 +166,7 @@ def test_reasoning_prompt_guides_temp_file_staging():
 
 
 def test_reasoning_prompt_stays_compact_ascii_and_task_oriented():
-    from agent_runtime.config import default_asset
+    from relay.config import default_asset
 
     raw = default_asset("prompts/reasoning.md")
     raw.encode("ascii")

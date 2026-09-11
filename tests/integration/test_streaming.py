@@ -7,9 +7,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from agent_runtime import Agent, AgentConfig
-from agent_runtime.models.action import NeedleResult
-from agent_runtime.models.streaming import ModelDelta
+from relay import Agent, AgentConfig
+from relay.models.action import NeedleResult
+from relay.models.streaming import ModelDelta
 
 
 def packet(text="", *, channel="content", finish=None, **extras):
@@ -360,7 +360,7 @@ def test_reasoning_stream_has_a_wall_clock_deadline_even_with_heartbeats(backend
 
 
 def test_oversized_stream_is_bounded_before_execution(backend, monkeypatch):
-    monkeypatch.setattr("agent_runtime.models.streaming.MAX_STREAM_BYTES", 20)
+    monkeypatch.setattr("relay.models.streaming.MAX_STREAM_BYTES", 20)
     backend.script = lambda payload: iter([packet("<tool>Calculate 6*7.</tool>", finish="stop")])
     agent, action = make_agent(backend)
     state = agent.run("Test")

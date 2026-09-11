@@ -4,8 +4,8 @@ import argparse
 import os
 from pathlib import Path
 
-from agent_runtime import Agent, AgentConfig
-from agent_runtime.models.demo import DemoActionModel, DemoReasoningModel
+from relay import Agent, AgentConfig
+from relay.models.demo import DemoActionModel, DemoReasoningModel
 
 
 def main() -> None:
@@ -17,9 +17,9 @@ def main() -> None:
     config = AgentConfig(
         workspace_root=args.workspace,
         read_only=True,
-        llm_base_url=os.getenv("NEEDLE_LLM_BASE_URL", "http://127.0.0.1:8080"),
-        llm_model=os.getenv("NEEDLE_LLM_MODEL", "ornith"),
-        llm_api_key=os.getenv("NEEDLE_LLM_API_KEY"),
+        llm_base_url=os.getenv("RELAY_LLM_BASE_URL", "http://127.0.0.1:8080"),
+        llm_model=os.getenv("RELAY_LLM_MODEL", "ornith"),
+        llm_api_key=os.getenv("RELAY_LLM_API_KEY"),
     )
     models = {"reasoning": DemoReasoningModel(), "action": DemoActionModel()} if args.demo else {}
     with Agent(config, **models) as agent:
