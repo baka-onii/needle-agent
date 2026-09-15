@@ -60,6 +60,7 @@ def _add_config_arguments(parser: argparse.ArgumentParser) -> None:
     for flag, dest, kind in (
         ("base-url", "llm_base_url", str),
         ("model", "llm_model", str),
+        ("llm-api-key", "llm_api_key", str),
         ("max-tool-steps", "max_tool_steps", int),
         ("max-stalls", "max_stalls", int),
         ("confidence-threshold", "confidence_threshold", float),

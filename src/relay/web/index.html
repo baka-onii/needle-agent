@@ -671,7 +671,7 @@
               type="url"
               placeholder="http://127.0.0.1:8080/v1"
               required
-            /><label class="field-label" for="model-name">Model name</label
+            />            <label class="field-label" for="model-name">Model name</label
             ><input
               class="text-input"
               id="model-name"
@@ -679,16 +679,28 @@
               required
               maxlength="200"
             />
+            <label class="field-label" for="api-key">API key (optional)</label
+            ><input
+              class="text-input"
+              id="api-key"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Use a hosted model? Paste a key — kept in server memory for this session only"
+              maxlength="500"
+            />
             <p class="field-help">
-              llama.cpp, Ollama, or any OpenAI-compatible server. This URL must
+              llama.cpp, Ollama, or any OpenAI-compatible server
+              (OpenAI, OpenRouter, Together, Groq, …). This URL must
               be reachable from the <strong>Python server</strong>, not just
-              your browser.
+              your browser. The key is never saved, exported, or shown again.
             </p>
             <div class="key-notice">
               <svg class="icon tiny"><use href="#i-shield" /></svg>
               <p>
-                Keys stay server-side. Set <code>RELAY_LLM_API_KEY</code> in
-                the server’s environment if your provider requires one.
+                No key needed for local servers. For a hosted provider, paste
+                your key above (session-only, never saved) or set
+                <code>RELAY_LLM_API_KEY</code> in the server’s environment.
               </p>
             </div>
           </div>

@@ -1581,6 +1581,11 @@ function showSettings() {
   $(`input[name="mode"][value="${s.mode}"]`).checked = true;
   $("#base-url").value = s.base_url;
   $("#model-name").value = s.model;
+  // The server never returns the key; the field always starts empty.
+  $("#api-key").value = "";
+  $("#api-key").placeholder = S.apiKeySet
+    ? "A session key is set — enter a new one to replace it, or save blank to clear"
+    : "Use a hosted model? Paste a key — kept in server memory for this session only";
   $("#max-steps").value = s.max_tool_steps;
   $("#read-threshold").value = s.read_only_threshold;
   $("#write-threshold").value = s.confidence_threshold;
@@ -1602,6 +1607,7 @@ function updateModeExplanation() {
   $("#live-settings").classList.toggle("hidden", demo);
   $("#base-url").disabled = demo;
   $("#model-name").disabled = demo;
+  $("#api-key").disabled = demo;
   $("#mode-explanation").textContent = demo
     ? "A deterministic demo, not a language model. Try search, reading, arithmetic, time, and approved writes through the real runtime. Confidence scores are simulated."
     : "Your reasoning model emits natural-language intents. Needle 2 translates them into tool calls. The runtime validates and gates every action. Live mode never silently falls back to the demo.";
@@ -1612,6 +1618,7 @@ function settingsFromForm() {
     mode: $('input[name="mode"]:checked').value,
     base_url: $("#base-url").value.trim(),
     model: $("#model-name").value.trim(),
+    api_key: $("#api-key").value.trim(),
     max_tool_steps: Number($("#max-steps").value),
     read_only_threshold: Number($("#read-threshold").value),
     confidence_threshold: Number($("#write-threshold").value),
@@ -1639,6 +1646,7 @@ async function saveSettings(event) {
       body: settingsFromForm(),
     });
     S.settings = result.settings;
+    $("#api-key").value = "";
     renderSettings();
     $("#settings-dialog").close();
     toast(
@@ -2193,6 +2201,7 @@ async function boot() {
     S.token = data.session_token;
     stored("relay-session", S.token);
     S.readOnlyEnforced = data.read_only_enforced;
+    S.apiKeySet = Boolean(data.api_key_set);
     S.settings = data.settings;
     S.workspace = data.workspace;
     S.tools = data.tools;

@@ -631,6 +631,122 @@ def test_approval_edits_are_validated(web):
     }
 
 
+def test_session_api_key_unlocks_other_providers_without_leaking(web):
+    service, base, _ = web
+    token, _ = setup_conversation(base)
+    _, bootstrap = request(base, "/api/session", token=token)
+    assert bootstrap["settings"]["api_key"] == ""
+    assert bootstrap["api_key_configured"] is True
+    assert bootstrap["api_key_set"] is True  # server key counts
+    # A session key bypasses the server-key origin binding.
+    status, result = request(
+        base,
+        "/api/settings",
+        method="POST",
+        token=token,
+        data={
+            **bootstrap["settings"],
+            "mode": "live",
+            "base_url": "https://different-provider.example",
+            "api_key": "session-only-secret",
+        },
+    )
+    assert status == 200
+    assert result["settings"]["api_key"] == ""  # redacted in the response
+    assert service.session_keys[token] == "session-only-secret"
+    config = service.run_config(
+        service.sessions[token].settings, service.session_keys[token]
+    )
+    assert config.llm_api_key == "session-only-secret"
+    assert config.llm_base_url == "https://different-provider.example"
+    # Never persisted, exported, or echoed back.
+    _, bootstrap = request(base, "/api/session", token=token)
+    assert bootstrap["settings"]["api_key"] == ""
+    assert "session-only-secret" not in json.dumps(bootstrap)
+    _, exported = request(base, "/api/settings/export", token=token)
+    assert "session-only-secret" not in exported["content"]
+    if service.store is not None:
+        stored = json.loads(service.store.load()["sessions"][token])
+        assert stored.get("api_key", "") == ""
+        assert "session-only-secret" not in json.dumps(service.store.load())
+    else:
+        # No SQLite in this fixture: verify _remember redacts before writing.
+        saved = {}
+        service.store = type(
+            "FakeStore",
+            (),
+            {
+                "save_session": lambda self, t, d: saved.setdefault(t, d),
+                "save_conversation": lambda self, *a: None,
+            },
+        )()
+        try:
+            service._remember(service.sessions[token])
+        finally:
+            service.store = None
+        assert json.loads(saved[token]).get("api_key", "") == ""
+        assert "session-only-secret" not in saved[token]
+    # Saving blank clears the session key (back on the server origin);
+    # the server-key binding then applies again to foreign origins.
+    status, _ = request(
+        base,
+        "/api/settings",
+        method="POST",
+        token=token,
+        data={
+            **bootstrap["settings"],
+            "mode": "live",
+            "base_url": service.config.llm_base_url,
+            "api_key": "",
+        },
+    )
+    assert status == 200
+    assert token not in service.session_keys
+    status, body = request(
+        base,
+        "/api/settings",
+        method="POST",
+        token=token,
+        data={
+            **bootstrap["settings"],
+            "mode": "live",
+            "base_url": "https://different-provider.example",
+        },
+    )
+    assert status == 403 and "API key is bound" in body["error"]
+
+
+def test_session_without_server_key_can_use_any_origin_and_reports_key_state(web):
+    from relay.server import WorkspaceService
+
+    service, _, _ = web
+    plain = WorkspaceService(
+        AgentConfig(workspace_root=str(service.config.workspace_root))
+    )
+    try:
+        session = plain.session(None, create=True)
+        assert plain.run_config(session.settings).llm_api_key is None
+        key = plain.update_settings(
+            session,
+            session.settings.model_copy(
+                update={
+                    "mode": "live",
+                    "base_url": "https://hosted.example/v1",
+                    "model": "remote-model",
+                    "api_key": "user-key",
+                }
+            ),
+        )
+        assert key.api_key == ""
+        config = plain.run_config(session.settings, plain.session_keys[session.token])
+        assert config.llm_api_key == "user-key"
+        assert plain.bootstrap(session)["api_key_set"] is True
+        plain.update_settings(session, session.settings.model_copy())
+        assert plain.bootstrap(session)["api_key_set"] is False
+    finally:
+        plain.close()
+
+
 def test_auto_approve_is_session_only_and_validated(web):
     service, base, _ = web
     assert "run_python" in service.config.require_approval_for

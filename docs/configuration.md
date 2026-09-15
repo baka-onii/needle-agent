@@ -89,8 +89,14 @@ that cannot return SSE. The `[streaming]` settings are described in the
 
 The `[models]` section optionally accepts `needle_weights`, resolved relative to the file.
 Custom Needle weights currently have no calibrated confidence; missing scores fail closed.
-Keep credentials in `RELAY_LLM_API_KEY`. API keys are not file settings, browser settings,
-or config exports. URLs containing credentials, queries, or fragments are rejected.
+Keep server credentials in `RELAY_LLM_API_KEY` (or `--llm-api-key`; prefer the env var so
+the key does not appear in process listings). API keys are not file settings or config
+exports. A browser user can additionally paste their own key in Settings ("API key") to
+use a non-local OpenAI-compatible provider (OpenAI, OpenRouter, Together, Groq, …) with
+any free-form base URL: that key lives in server memory for that browser session only —
+never in SQLite, exports, imports, traces, or logs — and is cleared when the session
+expires. A session key bypasses the server-key origin binding; without one, the binding
+still applies. URLs containing credentials, queries, or fragments are rejected.
 
 See `config/defaults.toml` for the canonical complete list. Basic validity and safety
 checks always apply. The browser additionally caps resource values (for example, 100
@@ -166,10 +172,12 @@ moving to a different machine. Programmatic users can call
 
 ## Browser settings and persistence
 
-**Settings** exposes prompts, mode/model URL/name, generation limits, timeouts, confidence
-thresholds, retry limits, context/output budgets, directory/search limits, timezone, and
-workspace write policy. Saving applies to the next run; stop the current run before
-changing settings. **Restore server instructions** restores only the three prompt fields
+**Settings** exposes prompts, mode/model URL/name plus an optional session API key,
+generation limits, timeouts, confidence thresholds, retry limits, context/output budgets,
+directory/search limits, timezone, and workspace write policy. Saving applies to the
+next run; stop the current run before changing settings. The key field always loads
+empty (the server never returns it); saving blank clears the session key.
+**Restore server instructions** restores only the three prompt fields
 in the form; click Save to apply. It restores the operator's startup values, including
 any prompt files loaded by the server, not unrelated browser defaults.
 

@@ -79,6 +79,9 @@ class Settings(BaseModel):
     mode: Literal["demo", "live"] = _DEFAULT_CONFIG.mode
     base_url: str = Field(default=_DEFAULT_CONFIG.llm_base_url, max_length=2048)
     model: str = Field(default=_DEFAULT_CONFIG.llm_model, min_length=1, max_length=200)
+    # Session-only credential for non-local OpenAI-compatible providers. Never
+    # persisted, exported, or echoed back; held in server memory per session.
+    api_key: str = Field(default="", max_length=500)
     confidence_threshold: float = Field(
         default=_DEFAULT_CONFIG.confidence_threshold, ge=0, le=1, allow_inf_nan=False
     )
@@ -143,6 +146,15 @@ class Settings(BaseModel):
         api_base_url(value)
         return value.strip().rstrip("/")
 
+    @field_validator("api_key")
+    @classmethod
+    def clean_key(cls, value: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError("API key must be text.")
+        if "\x00" in value:
+            raise ValueError("API key must not contain NUL bytes.")
+        return value.strip()
+
 
 _SETTING_FIELDS = {
     name: {"base_url": "llm_base_url", "model": "llm_model"}.get(name, name)
@@ -151,6 +163,9 @@ _SETTING_FIELDS = {
 # Session-only quick permissions: never mapped onto AgentConfig, so they are
 # not exported, imported, or persisted to files. run_config() applies them.
 _SETTING_FIELDS.pop("auto_approve")
+# Session-only credential: held in WorkspaceService.session_keys (server memory
+# only), never in persisted settings, exports, or imports.
+_SETTING_FIELDS.pop("api_key")
 
 
 def settings_from_config(config: AgentConfig) -> Settings:
@@ -353,6 +368,9 @@ class WorkspaceService:
             replace(self.config, mode="demo" if demo else config.mode)
         )
         self.sessions: dict[str, BrowserSession] = {}
+        # Session-only API keys for non-local providers. Server memory only:
+        # never persisted to SQLite, exported, or logged. Keyed by session token.
+        self.session_keys: dict[str, str] = {}
         self.lock = threading.RLock()
         self.agent_factory = agent_factory or self._make_agent
         self.store = _open_store(store_path)
@@ -364,9 +382,9 @@ class WorkspaceService:
         if self.store is None:
             return
         try:
-            self.store.save_session(
-                session.token, json.dumps(session.settings.model_dump())
-            )
+            dumped = session.settings.model_dump()
+            dumped["api_key"] = ""  # Session keys never reach SQLite.
+            self.store.save_session(session.token, json.dumps(dumped))
             for conversation in session.conversations.values():
                 self.store.save_conversation(
                     conversation.id,
@@ -390,6 +408,8 @@ class WorkspaceService:
                 settings = Settings.model_validate(settings_data)
             except ValidationError:
                 continue
+            # Belt-and-braces: a stored key must never become live again.
+            settings = settings.model_copy(update={"api_key": ""})
             session = BrowserSession(token, settings)
             self.sessions[token] = session
             for conv in data["conversations"]:
@@ -423,6 +443,7 @@ class WorkspaceService:
                     for run in existing.runs.values():
                         run.stop()
                     del self.sessions[key]
+                    self.session_keys.pop(key, None)
             if token and token in self.sessions:
                 self.sessions[token].touched = now
                 return self.sessions[token]
@@ -436,18 +457,23 @@ class WorkspaceService:
             self._remember(session)
             return session
 
-    def run_config(self, settings: Settings) -> AgentConfig:
-        # A browser may not redirect a server-owned API key to a different provider.
-        if self.config.llm_api_key and settings.mode == "live":
+    def run_config(self, settings: Settings, session_key: str = "") -> AgentConfig:
+        # A session-supplied key belongs to the browser user, so any provider
+        # origin is allowed. The origin bind below applies only when the
+        # effective key is the server-owned one.
+        effective_key = (session_key or "").strip() or self.config.llm_api_key
+        if not session_key and self.config.llm_api_key and settings.mode == "live":
             configured = urlsplit(api_base_url(self.config.llm_base_url))
             requested = urlsplit(api_base_url(settings.base_url))
             if (configured.scheme, configured.netloc) != (requested.scheme, requested.netloc):
                 raise WebError(
                     403,
                     "The API key is bound to the server-configured model origin. "
-                    "Change RELAY_LLM_BASE_URL on the server to switch providers.",
+                    "Change RELAY_LLM_BASE_URL on the server to switch providers, "
+                    "or enter your own session API key to use another provider.",
                 )
         values = {field: getattr(settings, name) for name, field in _SETTING_FIELDS.items()}
+        values["llm_api_key"] = effective_key or None
         values["read_only"] = self.config.read_only or settings.read_only
         if settings.auto_approve:
             known = {tool.name for tool in create_default_registry(self.config).list()}
@@ -463,15 +489,23 @@ class WorkspaceService:
         ContextManager(config, build_system_prompt(create_default_registry(config).list(), config))
         return config
 
-    def update_settings(self, session: BrowserSession, settings: Settings) -> None:
-        with session.lock:
-            if session.busy():
-                raise WebError(409, "Stop the active run before changing settings.")
-            if self.config.read_only and not settings.read_only:
-                raise WebError(403, "The server was started in read-only mode.")
-            self.run_config(settings)
-            session.settings = settings
-            self._remember(session)
+    def update_settings(self, session: BrowserSession, settings: Settings) -> Settings:
+        """Store settings and hold any API key in memory only. Returns redacted settings."""
+        with self.lock:
+            with session.lock:
+                if session.busy():
+                    raise WebError(409, "Stop the active run before changing settings.")
+                if self.config.read_only and not settings.read_only:
+                    raise WebError(403, "The server was started in read-only mode.")
+                self.run_config(settings, settings.api_key)
+                if settings.api_key.strip():
+                    self.session_keys[session.token] = settings.api_key.strip()
+                else:
+                    self.session_keys.pop(session.token, None)
+                redacted = settings.model_copy(update={"api_key": ""})
+                session.settings = redacted
+                self._remember(session)
+                return redacted
 
     def import_settings(self, session: BrowserSession, document: ConfigImport) -> dict:
         values = parse_config(document.content, format=document.format)
@@ -482,17 +516,19 @@ class WorkspaceService:
             combined.update(
                 {reverse[key]: value for key, value in values.items() if key in reverse}
             )
+            # Imports never carry credentials; a stored session key is untouched.
+            combined["api_key"] = ""
             settings = Settings.model_validate(combined)
-            self.update_settings(session, settings)
-        return {"settings": settings.model_dump(), "ignored": ignored}
+            redacted = self.update_settings(session, settings)
+        return {"settings": redacted.model_dump(), "ignored": ignored}
 
-    def _make_agent(self, settings: Settings, run: Run) -> Agent:
+    def _make_agent(self, settings: Settings, run: Run, session_key: str = "") -> Agent:
         models = (
             {"reasoning": DemoReasoningModel(), "action": DemoActionModel()}
             if settings.mode == "demo"
             else {}
         )
-        config = self.run_config(settings)
+        config = self.run_config(settings, session_key)
 
         def approve(call: ToolCall) -> bool | ToolCall:
             outcome = run.wait_for_user(
@@ -515,16 +551,21 @@ class WorkspaceService:
         )
 
     def bootstrap(self, session: BrowserSession) -> dict:
-        registry = create_default_registry(self.run_config(session.settings))
+        with self.lock:
+            session_key = self.session_keys.get(session.token, "")
+        registry = create_default_registry(self.run_config(session.settings, session_key))
         with session.lock:
+            dumped = session.settings.model_dump()
+            dumped["api_key"] = ""  # The value is never sent back to the browser.
             return {
                 "session_token": session.token,
-                "settings": session.settings.model_dump(),
+                "settings": dumped,
                 "workspace": {
                     "name": Path(self.config.workspace_root).name,
                     "path": self.config.workspace_root,
                 },
                 "api_key_configured": bool(self.config.llm_api_key),
+                "api_key_set": bool(session_key or self.config.llm_api_key),
                 "read_only_enforced": self.config.read_only,
                 "tools": [tool.needle_schema() for tool in registry.list()],
                 "payload_args": {
@@ -644,7 +685,13 @@ class WorkspaceService:
 
         agent = None
         try:
-            agent = self.agent_factory(settings, run)
+            with self.lock:
+                session_key = self.session_keys.get(session.token, "")
+            try:
+                agent = self.agent_factory(settings, run, session_key)
+            except TypeError:
+                # Custom test factories taking (settings, run) keep working.
+                agent = self.agent_factory(settings, run)
             agent.run(
                 message, history=conversation.history, on_event=receive, cancelled=run.cancel.is_set
             )
@@ -757,13 +804,13 @@ class WorkspaceService:
         children.sort(key=lambda item: (item["type"] != "directory", item["name"].casefold()))
         return {"path": path, "entries": children, "limited": len(children) == 200}
 
-    def check_connection(self, settings: Settings) -> dict:
+    def check_connection(self, settings: Settings, session_key: str = "") -> dict:
         if settings.mode == "demo":
             return {
                 "ok": True,
                 "message": "Offline demo is ready. Simulated planning and confidence; real tools.",
             }
-        config = self.run_config(settings)
+        config = self.run_config(settings, session_key or settings.api_key)
         reasoning = OpenAICompatibleReasoningModel(
             config.llm_base_url,
             config.llm_model,
@@ -799,6 +846,7 @@ class WorkspaceService:
             for session in self.sessions.values():
                 for run in session.runs.values():
                     run.stop()
+            self.session_keys.clear()
         if self.store is not None:
             try:
                 self.store.close()
@@ -908,15 +956,17 @@ def make_server(service: WorkspaceService, host: str = "0.0.0.0", port: int = 30
                     return
                 if path == "/api/settings" and method == "POST":
                     settings = Settings.model_validate(self.body())
-                    service.update_settings(session, settings)
-                    self.json({"settings": settings.model_dump()})
+                    redacted = service.update_settings(session, settings)
+                    self.json({"settings": redacted.model_dump()})
                     return
                 if path == "/api/settings/defaults" and method == "GET":
                     self.json({"settings": service.default_settings.model_dump()})
                     return
                 if path == "/api/settings/export" and method == "GET":
+                    with service.lock:
+                        session_key = service.session_keys.get(session.token, "")
                     with session.lock:
-                        config = service.run_config(session.settings)
+                        config = service.run_config(session.settings, session_key)
                         self.json(
                             {
                                 "filename": "relay.toml",
@@ -930,7 +980,9 @@ def make_server(service: WorkspaceService, host: str = "0.0.0.0", port: int = 30
                     return
                 if path == "/api/connection" and method == "POST":
                     settings = Settings.model_validate(self.body())
-                    self.json(service.check_connection(settings))
+                    with service.lock:
+                        session_key = service.session_keys.get(session.token, "")
+                    self.json(service.check_connection(settings, session_key))
                     return
                 if path == "/api/files" and method == "GET":
                     self.json(service.list_files(query.get("path", ["."])[0]))
